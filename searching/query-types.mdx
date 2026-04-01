@@ -1,0 +1,337 @@
+---
+title: Query types
+description: Reference for every major Lucene query class, including code examples and guidance on when to use each one.
+keywords: [TermQuery, BooleanQuery, PhraseQuery, FuzzyQuery, WildcardQuery, RangeQuery, KnnFloatVectorQuery, Lucene queries]
+---
+
+Lucene provides a rich set of query classes. All extend `org.apache.lucene.search.Query` and can be combined with `BooleanQuery`. The sections below describe each type, when to reach for it, and how to construct it.
+
+<AccordionGroup>
+
+<Accordion title="TermQuery">
+
+Matches documents that contain an exact term in a specified field. It is the simplest and most efficient query type.
+
+```java
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.TermQuery;
+
+// Match documents where the "status" field contains the term "published"
+TermQuery query = new TermQuery(new Term("status", "published"));
+```
+
+`TermQuery` matches the literal byte value stored in the index. If the field was analyzed at index time, you must use the same analyzed form (e.g. lowercased) as the search term.
+
+</Accordion>
+
+<Accordion title="BooleanQuery">
+
+Combines multiple sub-queries using Boolean logic. Each clause carries an `Occur` value:
+
+| Occur | Meaning |
+|---|---|
+| `MUST` | The clause must match. Contributes to the score. |
+| `SHOULD` | The clause may match. Contributes to the score when it does. |
+| `MUST_NOT` | The clause must not match. Does not contribute to the score. |
+| `FILTER` | The clause must match but does not contribute to the score. |
+
+Use `BooleanQuery.Builder` to assemble clauses:
+
+```java
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.index.Term;
+
+BooleanQuery query = new BooleanQuery.Builder()
+    .add(new TermQuery(new Term("category", "java")),   BooleanClause.Occur.MUST)
+    .add(new TermQuery(new Term("body", "streams")),    BooleanClause.Occur.SHOULD)
+    .add(new TermQuery(new Term("status", "deleted")),  BooleanClause.Occur.MUST_NOT)
+    .build();
+```
+
+To require a minimum number of `SHOULD` clauses to match, call `setMinimumNumberShouldMatch`:
+
+```java
+BooleanQuery query = new BooleanQuery.Builder()
+    .add(new TermQuery(new Term("tag", "java")),   BooleanClause.Occur.SHOULD)
+    .add(new TermQuery(new Term("tag", "jvm")),    BooleanClause.Occur.SHOULD)
+    .add(new TermQuery(new Term("tag", "lucene")), BooleanClause.Occur.SHOULD)
+    .setMinimumNumberShouldMatch(2)
+    .build();
+```
+
+<Note>
+The default maximum clause count is 1,024. Attempting to add more clauses throws `IndexSearcher.TooManyClauses`. Increase the limit with `IndexSearcher.setMaxClauseCount(int)`.
+</Note>
+
+</Accordion>
+
+<Accordion title="PhraseQuery and MultiPhraseQuery">
+
+`PhraseQuery` matches documents that contain a sequence of terms in order, with an optional slop (number of allowed intervening positions).
+
+```java
+import org.apache.lucene.search.PhraseQuery;
+import org.apache.lucene.index.Term;
+
+// Exact phrase "quick brown"
+PhraseQuery exact = new PhraseQuery("body", "quick", "brown");
+
+// Slop of 1 allows one position between the terms
+PhraseQuery sloppy = new PhraseQuery.Builder()
+    .add(new Term("body", "quick"))
+    .add(new Term("body", "fox"))
+    .setSlop(1)
+    .build();
+```
+
+`MultiPhraseQuery` allows multiple alternative terms at one or more positions, which is useful for synonyms:
+
+```java
+import org.apache.lucene.search.MultiPhraseQuery;
+
+MultiPhraseQuery query = new MultiPhraseQuery.Builder()
+    .add(new Term[] {
+        new Term("body", "fast"),
+        new Term("body", "quick")    // synonym at position 0
+    })
+    .add(new Term("body", "brown"))  // position 1
+    .build();
+```
+
+</Accordion>
+
+<Accordion title="FuzzyQuery">
+
+Matches terms within a given edit distance (Damerau-Levenshtein) of the target term. Useful for handling typos.
+
+```java
+import org.apache.lucene.search.FuzzyQuery;
+import org.apache.lucene.index.Term;
+
+// maxEdits=2, prefixLength=1, maxExpansions=50 (defaults)
+FuzzyQuery query = new FuzzyQuery(new Term("body", "lucene"), 2);
+
+// With a required common prefix of 2 characters
+FuzzyQuery prefixed = new FuzzyQuery(
+    new Term("body", "lucene"),
+    2,   // maxEdits
+    2,   // prefixLength — first 2 chars must match exactly
+    50,  // maxExpansions
+    true // transpositions (Damerau vs Levenshtein)
+);
+```
+
+<Note>
+Lucene supports at most 2 edits (`LevenshteinAutomata.MAXIMUM_SUPPORTED_DISTANCE`). Terms shorter than 3 characters are unlikely to match because the minimum term length is used to bound the allowed edit distance.
+</Note>
+
+</Accordion>
+
+<Accordion title="WildcardQuery">
+
+Matches terms using `?` (single character) and `*` (zero or more characters) wildcards.
+
+```java
+import org.apache.lucene.search.WildcardQuery;
+import org.apache.lucene.index.Term;
+
+// Matches "lucene", "lucency", "lucent", etc.
+WildcardQuery query = new WildcardQuery(new Term("body", "luce*"));
+
+// Matches "color" and "colour"
+WildcardQuery query2 = new WildcardQuery(new Term("body", "colo?r"));
+```
+
+<Warning>
+Leading wildcards (`*ene`) force a full term dictionary scan and can be very slow on large indexes. Where possible, prefer `PrefixQuery` or indexed n-grams instead.
+</Warning>
+
+</Accordion>
+
+<Accordion title="PrefixQuery">
+
+Matches all terms that begin with a given prefix. More efficient than a leading-wildcard `WildcardQuery`.
+
+```java
+import org.apache.lucene.search.PrefixQuery;
+import org.apache.lucene.index.Term;
+
+// Matches "java", "javascript", "javadoc", etc.
+PrefixQuery query = new PrefixQuery(new Term("language", "java"));
+```
+
+</Accordion>
+
+<Accordion title="TermRangeQuery">
+
+Matches all terms in a field that fall within a lexicographic range. Suitable for string fields (e.g. dates stored as `yyyyMMdd` strings).
+
+```java
+import org.apache.lucene.search.TermRangeQuery;
+import org.apache.lucene.util.BytesRef;
+
+// Matches terms from "20240101" to "20241231", both inclusive
+TermRangeQuery query = new TermRangeQuery(
+    "date",
+    new BytesRef("20240101"),
+    new BytesRef("20241231"),
+    true,   // includeLower
+    true    // includeUpper
+);
+```
+
+</Accordion>
+
+<Accordion title="PointRangeQuery (numeric ranges)">
+
+For numeric fields indexed with `IntField`, `LongField`, `FloatField`, or `DoubleField`, use the static range methods on the corresponding point class. These are backed by a BKD tree and are significantly faster than `TermRangeQuery` for numeric data.
+
+```java
+import org.apache.lucene.document.IntField;
+import org.apache.lucene.document.LongField;
+import org.apache.lucene.document.FloatField;
+import org.apache.lucene.document.DoubleField;
+import org.apache.lucene.search.Query;
+
+// Integer range: price between 10 and 100 (inclusive)
+Query intRange = IntField.newRangeQuery("price", 10, 100);
+
+// Long range: timestamps
+Query longRange = LongField.newRangeQuery("timestamp",
+    1_700_000_000L, 1_800_000_000L);
+
+// Float range
+Query floatRange = FloatField.newRangeQuery("rating", 3.5f, 5.0f);
+
+// Double range
+Query doubleRange = DoubleField.newRangeQuery("score", 0.8, 1.0);
+```
+
+</Accordion>
+
+<Accordion title="RegexpQuery">
+
+Matches terms that conform to a regular expression using Lucene's automaton-based regexp engine (not Java's `java.util.regex`).
+
+```java
+import org.apache.lucene.search.RegexpQuery;
+import org.apache.lucene.index.Term;
+
+// Matches "colour" and "color"
+RegexpQuery query = new RegexpQuery(new Term("body", "colou?r"));
+```
+
+Lucene's regexp syntax supports `.`, `*`, `+`, `?`, `|`, `[...]`, and `{n,m}` repetition but does not support lookaheads or backreferences.
+
+</Accordion>
+
+<Accordion title="MatchAllDocsQuery and MatchNoDocsQuery">
+
+`MatchAllDocsQuery` matches every document in the index. `MatchNoDocsQuery` matches none.
+
+```java
+import org.apache.lucene.search.MatchAllDocsQuery;
+import org.apache.lucene.search.MatchNoDocsQuery;
+
+// Returns all documents (useful as a filter base)
+Query all = new MatchAllDocsQuery();
+
+// Returns no documents
+Query none = new MatchNoDocsQuery();
+```
+
+</Accordion>
+
+<Accordion title="ConstantScoreQuery">
+
+Wraps another query and assigns a constant score to all matching documents, bypassing BM25 scoring. Useful when you need a filter that contributes to ranking but with a fixed weight.
+
+```java
+import org.apache.lucene.search.ConstantScoreQuery;
+
+Query filter = new TermQuery(new Term("status", "active"));
+ConstantScoreQuery query = new ConstantScoreQuery(filter);
+// All matching documents receive a score of 1.0
+```
+
+To assign a specific boost value, wrap with `BoostQuery`:
+
+```java
+import org.apache.lucene.search.BoostQuery;
+
+Query boosted = new BoostQuery(new ConstantScoreQuery(filter), 2.5f);
+```
+
+</Accordion>
+
+<Accordion title="DisjunctionMaxQuery">
+
+Returns documents matching any of the sub-queries, but scores each document using only the highest-scoring sub-query match rather than summing scores. A small `tieBreakMultiplier` is added to distinguish documents that match more than one sub-query.
+
+```java
+import org.apache.lucene.search.DisjunctionMaxQuery;
+import java.util.List;
+
+Query titleMatch = new TermQuery(new Term("title", "lucene"));
+Query bodyMatch  = new TermQuery(new Term("body",  "lucene"));
+
+DisjunctionMaxQuery query = new DisjunctionMaxQuery(
+    List.of(titleMatch, bodyMatch),
+    0.1f  // tieBreakMultiplier
+);
+```
+
+</Accordion>
+
+<Accordion title="KnnFloatVectorQuery (vector / semantic search)">
+
+Performs approximate k-nearest-neighbor search over a float vector field indexed with `KnnFloatVectorField`. Returns the `k` nearest neighbors by cosine or dot-product similarity, depending on how the field was configured.
+
+```java
+import org.apache.lucene.search.KnnFloatVectorQuery;
+
+float[] queryVector = computeEmbedding("what is apache lucene?");
+
+// Find the 10 nearest neighbors in the "contents-vector" field
+KnnFloatVectorQuery knnQuery = new KnnFloatVectorQuery(
+    "contents-vector",
+    queryVector,
+    10
+);
+
+TopDocs results = searcher.search(knnQuery, 10);
+```
+
+You can combine a `KnnFloatVectorQuery` with a `BooleanQuery` to blend keyword and semantic results:
+
+```java
+BooleanQuery hybrid = new BooleanQuery.Builder()
+    .add(new TermQuery(new Term("body", "lucene")), BooleanClause.Occur.SHOULD)
+    .add(knnQuery,                                  BooleanClause.Occur.SHOULD)
+    .build();
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Quick reference table
+
+| Query class | Typical use case |
+|---|---|
+| `TermQuery` | Exact keyword match |
+| `BooleanQuery` | Combine multiple queries |
+| `PhraseQuery` | Ordered phrase matching with optional slop |
+| `MultiPhraseQuery` | Phrase matching with synonym alternatives |
+| `FuzzyQuery` | Typo-tolerant term matching |
+| `WildcardQuery` | Glob-style pattern matching |
+| `PrefixQuery` | Prefix / autocomplete |
+| `TermRangeQuery` | Lexicographic range on string fields |
+| `IntField.newRangeQuery` etc. | Numeric range on point-indexed fields |
+| `RegexpQuery` | Regular expression on term dictionary |
+| `MatchAllDocsQuery` | Return all documents |
+| `ConstantScoreQuery` | Filter without scoring |
+| `DisjunctionMaxQuery` | Multi-field best-match scoring |
+| `KnnFloatVectorQuery` | Dense vector / semantic search |

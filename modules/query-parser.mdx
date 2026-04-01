@@ -1,0 +1,151 @@
+---
+title: "Query parser"
+description: "Parse user query strings into Lucene Query objects"
+---
+
+The query parser module translates human-readable query strings into Lucene `Query` objects. It supports a rich syntax for boolean logic, phrase search, field targeting, wildcards, fuzzy matching, and more.
+
+## Dependency
+
+<CodeGroup>
+
+```xml Maven
+<dependency>
+  <groupId>org.apache.lucene</groupId>
+  <artifactId>lucene-queryparser</artifactId>
+  <version>${lucene.version}</version>
+</dependency>
+```
+
+```gradle Gradle
+implementation "org.apache.lucene:lucene-queryparser:${luceneVersion}"
+```
+
+</CodeGroup>
+
+## Classic QueryParser syntax
+
+`QueryParser` accepts queries with the following syntax:
+
+| Syntax | Example | Meaning |
+|---|---|---|
+| Field targeting | `title:lucene` | Search the `title` field |
+| Boolean AND | `lucene AND search` | Both terms required |
+| Boolean OR | `lucene OR search` | Either term |
+| Boolean NOT | `lucene NOT java` | Exclude term |
+| Required/prohibited | `+lucene -java` | Require/exclude terms |
+| Phrase | `"apache lucene"` | Exact phrase |
+| Wildcard | `luce*` or `luc?ne` | Glob-style wildcard |
+| Fuzzy | `lucene~` or `lucene~1` | Edit-distance fuzzy |
+| Boost | `lucene^2 search` | Boost a term's relevance |
+| Range | `date:[2020-01-01 TO 2024-01-01]` | Inclusive range |
+| Grouping | `(lucene OR solr) AND search` | Grouped sub-query |
+
+<Note>
+`QueryParser` is **not** thread-safe. Create a new instance per thread or use `StandardQueryParser`, which is thread-safe.
+</Note>
+
+## QueryParser constructor and parse()
+
+```java
+import org.apache.lucene.queryparser.classic.QueryParser;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.search.Query;
+
+// First argument is the default field; second is the analyzer.
+QueryParser parser = new QueryParser("content", new StandardAnalyzer());
+
+// Parse returns a Query ready to pass to IndexSearcher.search().
+Query q = parser.parse("title:lucene AND \"full text search\"^2");
+```
+
+Key configuration methods on `QueryParser` / `QueryParserBase`:
+
+- `setDefaultOperator(QueryParser.Operator.AND)` — change the implicit operator from OR to AND
+- `setAllowLeadingWildcard(true)` — allow `*term` and `?term` patterns (expensive)
+- `setFuzzyMinSim(float)` — set the minimum similarity for fuzzy queries
+- `setDateResolution(DateTools.Resolution)` — configure date-range parsing resolution
+
+## StandardQueryParser
+
+`StandardQueryParser` is the flexible query framework alternative. It parses the same syntax as `QueryParser` but is built on a configurable processor pipeline and is thread-safe.
+
+```java
+import org.apache.lucene.queryparser.flexible.standard.StandardQueryParser;
+
+StandardQueryParser parser = new StandardQueryParser(new StandardAnalyzer());
+Query q = parser.parse("title:lucene AND released:[2020 TO 2024]", "content");
+```
+
+## SimpleQueryParser
+
+`SimpleQueryParser` is designed for user-facing search boxes. It is lenient — malformed input never throws an exception — and supports a reduced but intuitive syntax.
+
+```java
+import org.apache.lucene.queryparser.simple.SimpleQueryParser;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import java.util.HashMap;
+import java.util.Map;
+
+// Map of field name -> boost weight
+Map<String, Float> fields = new HashMap<>();
+fields.put("title", 2.0f);
+fields.put("body", 1.0f);
+
+SimpleQueryParser parser = new SimpleQueryParser(new StandardAnalyzer(), fields);
+Query q = parser.parse("apache lucene +search");
+```
+
+`SimpleQueryParser` supports `+` (required), `-` (prohibited), `"phrases"`, `*` prefix wildcard, `~` fuzzy, and `|` OR.
+
+## Escaping special characters
+
+The following characters have special meaning in the classic query syntax and must be escaped with a backslash when used as literals:
+
+```
++ - && || ! ( ) { } [ ] ^ " ~ * ? : \ /
+```
+
+To escape programmatically, use `QueryParser.escape()`:
+
+```java
+String userInput = "price: $100 (USD)";
+String escaped = QueryParser.escape(userInput);
+// escaped -> "price\:\ \$100\ \(USD\)"
+Query q = parser.parse(escaped);
+```
+
+## Complete example: parse and search
+
+<Steps>
+  <Step title="Open the index">
+    ```java
+    Directory dir = FSDirectory.open(Paths.get("/path/to/index"));
+    DirectoryReader reader = DirectoryReader.open(dir);
+    IndexSearcher searcher = new IndexSearcher(reader);
+    ```
+  </Step>
+  <Step title="Parse the query string">
+    ```java
+    Analyzer analyzer = new StandardAnalyzer();
+    QueryParser parser = new QueryParser("body", analyzer);
+    parser.setDefaultOperator(QueryParser.Operator.AND);
+    Query query = parser.parse("apache lucene search");
+    ```
+  </Step>
+  <Step title="Execute and display results">
+    ```java
+    TopDocs hits = searcher.search(query, 10);
+    StoredFields storedFields = searcher.storedFields();
+    for (ScoreDoc sd : hits.scoreDocs) {
+      Document doc = storedFields.document(sd.doc);
+      System.out.println(sd.score + " " + doc.get("title"));
+    }
+    reader.close();
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+For programmatically constructed queries—such as those built by your application rather than typed by a user—prefer the query API directly (`TermQuery`, `BooleanQuery`, etc.) over parsing a string. Parsing has overhead and the string format is not a stable API.
+</Tip>

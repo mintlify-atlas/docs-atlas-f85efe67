@@ -1,0 +1,310 @@
+---
+title: Sorting and scoring
+description: Control result order with Sort and SortField, paginate efficiently with searchAfter, boost queries, and customize the similarity function.
+keywords: [Sort, SortField, BM25, scoring, searchAfter, pagination, BoostQuery, Similarity, TopFieldCollector]
+---
+
+By default Lucene ranks results by BM25 relevance score. This page explains how to sort by field values, paginate without offset-based scanning, adjust scores with `BoostQuery`, and replace the default similarity.
+
+## Default relevance scoring (BM25)
+
+`IndexSearcher` uses `BM25Similarity` by default. BM25 scores each document based on:
+- **Term frequency** — how often the term appears in the document (with saturation).
+- **Inverse document frequency** — how rare the term is across the index.
+- **Field length normalization** — penalizes longer documents.
+
+The two primary parameters are:
+
+| Parameter | Effect | Default |
+|---|---|---|
+| `k1` | Controls term-frequency saturation | `1.2` |
+| `b` | Controls field-length normalization | `0.75` |
+
+```java
+import org.apache.lucene.search.similarities.BM25Similarity;
+
+// Default parameters
+searcher.setSimilarity(new BM25Similarity());
+
+// Tune parameters: less length normalization
+searcher.setSimilarity(new BM25Similarity(1.2f, 0.5f, true));
+```
+
+## Sorting by field value
+
+Pass a `Sort` to `search(Query, int, Sort)` to order results by one or more field values instead of score.
+
+### SortField types
+
+| Type | Description |
+|---|---|
+| `SCORE` | Descending relevance score (default) |
+| `DOC` | Ascending internal document id |
+| `STRING` | Lexicographic order using doc values (sorted set/bytes) |
+| `INT` | Numeric integer doc values |
+| `LONG` | Numeric long doc values |
+| `FLOAT` | Numeric float doc values |
+| `DOUBLE` | Numeric double doc values |
+
+```java
+import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
+
+// Sort by a string field ascending
+Sort byAuthor = new Sort(new SortField("author", SortField.Type.STRING));
+
+// Sort by an integer field descending (reverse=true)
+Sort byPriceDesc = new Sort(new SortField("price", SortField.Type.INT, true));
+
+// Sort by score (explicit)
+Sort byScore = new Sort(SortField.FIELD_SCORE);
+
+// Sort by index document order
+Sort byDoc = new Sort(SortField.FIELD_DOC);
+```
+
+Execute a sorted search:
+
+```java
+import org.apache.lucene.search.TopFieldDocs;
+
+TopFieldDocs results = searcher.search(query, 10, byPriceDesc);
+for (ScoreDoc hit : results.scoreDocs) {
+    System.out.println("docId=" + hit.doc);
+}
+```
+
+## Multi-field sort
+
+`Sort` accepts multiple `SortField` arguments. Later fields act as tie-breakers when earlier fields are equal.
+
+```java
+// Primary: category ascending; secondary: price descending
+Sort multiSort = new Sort(
+    new SortField("category", SortField.Type.STRING),
+    new SortField("price",    SortField.Type.INT, true)
+);
+
+TopFieldDocs results = searcher.search(query, 10, multiSort);
+```
+
+## Missing value handling
+
+When a document has no value for the sort field, pass a `missingValue` in the `SortField` constructor (the four-argument form). `SortField.setMissingValue()` was removed in Lucene 11.
+
+```java
+// Documents missing "price" sort last (Integer.MAX_VALUE = highest value)
+SortField priceSort = new SortField("price", SortField.Type.INT, false, Integer.MAX_VALUE);
+
+// Documents missing "price" sort first (Integer.MIN_VALUE = lowest value)
+SortField priceSortFirst = new SortField("price", SortField.Type.INT, false, Integer.MIN_VALUE);
+```
+
+For string fields use the constants `SortField.STRING_FIRST` and `SortField.STRING_LAST`:
+
+```java
+// Missing string values sort last
+SortField nameSort = new SortField("name", SortField.Type.STRING, false, SortField.STRING_LAST);
+```
+
+## Numeric sort with SortedNumericSortField
+
+When a field can hold multiple numeric values per document (indexed with `SortedNumericDocValuesField`), use `SortedNumericSortField` and choose a selector:
+
+```java
+import org.apache.lucene.search.SortedNumericSortField;
+import org.apache.lucene.search.SortedNumericSelector;
+
+// Sort by the minimum value in a multi-valued numeric field
+Sort byMinPrice = new Sort(new SortedNumericSortField(
+    "prices",
+    SortField.Type.LONG,
+    false,                                    // reverse
+    SortedNumericSelector.Type.MIN
+));
+```
+
+## Pagination with searchAfter
+
+Deep pagination using `from` + `size` requires scanning and discarding all preceding hits. `searchAfter` is more efficient: pass the last `ScoreDoc` from the previous page as an anchor, and Lucene begins collection after that document.
+
+<Steps>
+  <Step title="Execute the first page">
+    ```java
+    TopDocs page1 = searcher.search(query, 10);
+    ```
+  </Step>
+  <Step title="Retrieve subsequent pages">
+    Pass the last hit from the previous page as `after`.
+
+    ```java
+    ScoreDoc lastHit = page1.scoreDocs[page1.scoreDocs.length - 1];
+    TopDocs page2 = searcher.searchAfter(lastHit, query, 10);
+    ```
+  </Step>
+  <Step title="Continue until no more results">
+    ```java
+    while (page.scoreDocs.length > 0) {
+        ScoreDoc last = page.scoreDocs[page.scoreDocs.length - 1];
+        page = searcher.searchAfter(last, query, 10);
+    }
+    ```
+  </Step>
+</Steps>
+
+`searchAfter` also works with sorted searches:
+
+```java
+TopFieldDocs sortedPage1 = searcher.search(query, 10, byPriceDesc);
+FieldDoc lastSorted = (FieldDoc) sortedPage1.scoreDocs[sortedPage1.scoreDocs.length - 1];
+
+TopFieldDocs sortedPage2 = searcher.searchAfter(lastSorted, query, 10, byPriceDesc);
+```
+
+<Tip>
+`searchAfter` is safe to use for arbitrarily deep pages because it never scores or loads documents before the anchor. It is the recommended pagination strategy for large result sets.
+</Tip>
+
+## Boosting queries with BoostQuery
+
+`BoostQuery` multiplies the scores returned by a wrapped query by a constant factor. Values greater than 1.0 increase importance; values between 0 and 1 decrease it.
+
+```java
+import org.apache.lucene.search.BoostQuery;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.BooleanClause;
+
+Query titleMatch = new TermQuery(new Term("title", "lucene"));
+Query bodyMatch  = new TermQuery(new Term("body",  "lucene"));
+
+// Title matches are 3× more important than body matches
+BooleanQuery query = new BooleanQuery.Builder()
+    .add(new BoostQuery(titleMatch, 3.0f), BooleanClause.Occur.SHOULD)
+    .add(bodyMatch,                        BooleanClause.Occur.SHOULD)
+    .build();
+```
+
+`BoostQuery` requires a positive, finite boost value. A boost of `1.0f` is a no-op and is automatically unwrapped during rewriting.
+
+## Custom similarity
+
+Replace `BM25Similarity` by calling `IndexSearcher.setSimilarity` before the first search. Lucene ships several built-in implementations:
+
+<CodeGroup>
+
+```java BM25Similarity (default)
+import org.apache.lucene.search.similarities.BM25Similarity;
+
+// Use defaults
+searcher.setSimilarity(new BM25Similarity());
+
+// Tune: higher k1 increases the effect of term frequency
+searcher.setSimilarity(new BM25Similarity(2.0f, 0.75f, true));
+```
+
+```java ClassicSimilarity (TF-IDF)
+import org.apache.lucene.search.similarities.ClassicSimilarity;
+
+// Original Lucene TF-IDF scoring
+searcher.setSimilarity(new ClassicSimilarity());
+```
+
+```java LMDirichletSimilarity (language model)
+import org.apache.lucene.search.similarities.LMDirichletSimilarity;
+
+// Dirichlet language model with mu=2000
+searcher.setSimilarity(new LMDirichletSimilarity(2000f));
+```
+
+</CodeGroup>
+
+To implement a fully custom similarity, extend `org.apache.lucene.search.similarities.Similarity` and override `computeWeight` and `scorer`:
+
+```java
+import org.apache.lucene.search.similarities.Similarity;
+import org.apache.lucene.search.Explanation;
+
+public class MyRawTFSimilarity extends Similarity {
+
+    @Override
+    public long computeNorm(FieldInvertState state) {
+        // Disable length normalization
+        return 1L;
+    }
+
+    @Override
+    public SimScorer scorer(float boost,
+                            CollectionStatistics collectionStats,
+                            TermStatistics... termStats) {
+        return new SimScorer() {
+            @Override
+            public float score(float freq, long norm) {
+                return boost * freq;  // raw term frequency
+            }
+
+            @Override
+            public Explanation explain(Explanation freq, long norm) {
+                return Explanation.match(score(freq.getValue().floatValue(), norm),
+                    "raw TF score");
+            }
+        };
+    }
+}
+
+searcher.setSimilarity(new MyRawTFSimilarity());
+```
+
+## TopFieldCollector for sorted searches
+
+For finer control over sorted collection — such as tracking document scores alongside sort values — use `TopFieldCollectorManager` directly:
+
+```java
+import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.TopFieldCollector;
+import org.apache.lucene.search.TopFieldCollectorManager;
+import org.apache.lucene.search.TopFieldDocs;
+
+Sort sort = new Sort(new SortField("price", SortField.Type.INT, true));
+
+TopFieldCollectorManager manager =
+    new TopFieldCollectorManager(sort, 10, null, 1000);
+
+TopFieldDocs results = searcher.search(query, manager);
+
+for (ScoreDoc hit : results.scoreDocs) {
+    // hit is a FieldDoc when sorted; cast to access sort field values
+    org.apache.lucene.search.FieldDoc fieldDoc =
+        (org.apache.lucene.search.FieldDoc) hit;
+    System.out.println("docId=" + fieldDoc.doc
+        + "  sortValue=" + fieldDoc.fields[0]);
+}
+```
+
+## Common patterns
+
+<CodeGroup>
+
+```java Sort by date descending, relevance as tiebreak
+Sort byDateThenScore = new Sort(
+    new SortField("published", SortField.Type.LONG, true),  // newest first
+    SortField.FIELD_SCORE                                    // tiebreak by score
+);
+TopFieldDocs results = searcher.search(query, 10, byDateThenScore);
+```
+
+```java Sort string field, missing last
+SortField nameSort = new SortField("name", SortField.Type.STRING, false, SortField.STRING_LAST);
+Sort sort = new Sort(nameSort);
+TopFieldDocs results = searcher.search(query, 10, sort);
+```
+
+```java Paginate a sorted result set
+Sort sort = new Sort(new SortField("price", SortField.Type.INT));
+TopFieldDocs page1 = searcher.search(query, 10, sort);
+
+FieldDoc anchor = (FieldDoc) page1.scoreDocs[page1.scoreDocs.length - 1];
+TopFieldDocs page2 = searcher.searchAfter(anchor, query, 10, sort);
+```
+
+</CodeGroup>

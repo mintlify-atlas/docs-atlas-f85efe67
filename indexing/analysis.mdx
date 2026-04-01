@@ -1,0 +1,198 @@
+---
+title: "Text analysis"
+description: "How Lucene tokenizes and transforms text"
+---
+
+Analysis is the process of converting raw text into a stream of index terms. Lucene applies analysis at both **index time** (when a `TextField` is added to a document) and **query time** (when a query string is parsed). The same analyzer must produce the same terms at both ends, or queries will not match the indexed content.
+
+## What an Analyzer does
+
+An `Analyzer` builds a `TokenStream` from input text. The stream passes through a pipeline:
+
+1. **Tokenizer** — splits raw text into an initial sequence of tokens (e.g. splitting on whitespace or Unicode word boundaries).
+2. **TokenFilter chain** — each filter transforms the token stream: lowercasing, removing stop words, stemming, synonym expansion, etc.
+
+Subclasses implement `createComponents(String fieldName)` to define this pipeline:
+
+```java
+// From Analyzer.java (simplified):
+// An Analyzer builds TokenStreams, which analyze text. It thus represents
+// a policy for extracting index terms from text.
+//
+// Subclasses must define their TokenStreamComponents in createComponents(String).
+
+Analyzer analyzer = new Analyzer() {
+    @Override
+    protected TokenStreamComponents createComponents(String fieldName) {
+        Tokenizer source = new StandardTokenizer();
+        TokenStream filter = new LowerCaseFilter(source);
+        filter = new StopFilter(filter, StopAnalyzer.ENGLISH_STOP_WORDS_SET);
+        return new TokenStreamComponents(source, filter);
+    }
+};
+```
+
+The `fieldName` parameter lets you vary the pipeline per field within a single anonymous `Analyzer`, though `PerFieldAnalyzerWrapper` is the cleaner approach for most cases.
+
+## Built-in analyzers
+
+<CardGroup cols={3}>
+  <Card title="StandardAnalyzer" icon="text">
+    Tokenizes on Unicode text segmentation boundaries, lowercases, and removes a configurable stop word list. Good general-purpose default. Used by `IndexWriterConfig()` when no analyzer is supplied.
+  </Card>
+  <Card title="WhitespaceAnalyzer" icon="space">
+    Splits only on whitespace. Does not lowercase or remove stop words. Useful when case and punctuation are significant.
+  </Card>
+  <Card title="KeywordAnalyzer" icon="key">
+    Treats the entire input as a single token. Equivalent to `StringField` behavior but applied at the analyzer level. Useful in `PerFieldAnalyzerWrapper` for ID or category fields.
+  </Card>
+</CardGroup>
+
+All three are in `lucene-core`. Additional analyzers are in the `lucene-analysis-common` module.
+
+## Common token filters
+
+| Filter | Package | Effect |
+|---|---|---|
+| `LowerCaseFilter` | `lucene-core` | Lowercases every token. Almost always the first filter after tokenization. |
+| `StopFilter` | `lucene-analysis-common` | Removes tokens that appear in a configurable stop word set (e.g. "the", "a", "is"). |
+| `PorterStemFilter` | `lucene-analysis-common` | Applies the Porter stemming algorithm to reduce words to their root form ("running" → "run"). |
+| `EnglishPossessiveFilter` | `lucene-analysis-common` | Strips possessive `'s` from tokens. |
+| `ASCIIFoldingFilter` | `lucene-analysis-common` | Converts accented characters to their ASCII equivalents ("café" → "cafe"). |
+| `SynonymGraphFilter` | `lucene-analysis-common` | Expands tokens with configured synonyms at index or query time. |
+
+## Language analyzers in lucene-analysis-common
+
+The `lucene-analysis-common` module ships pre-built analyzers for many languages. They combine a language-appropriate tokenizer, stop word list, and stemmer.
+
+<AccordionGroup>
+  <Accordion title="EnglishAnalyzer">
+    Combines `StandardTokenizer`, `LowerCaseFilter`, `StopFilter` with English stop words, `EnglishPossessiveFilter`, and `PorterStemFilter`.
+  </Accordion>
+  <Accordion title="FrenchAnalyzer">
+    Uses `StandardTokenizer` with French stop words, `ElisionFilter` (removes elided articles like "l'"), and `FrenchLightStemFilter`.
+  </Accordion>
+  <Accordion title="GermanAnalyzer">
+    Uses `StandardTokenizer` with German stop words, `GermanNormalizationFilter`, and `GermanLightStemFilter`.
+  </Accordion>
+  <Accordion title="CJKAnalyzer">
+    Handles Chinese, Japanese, and Korean text using bigram tokenization and CJK-specific stop words.
+  </Accordion>
+</AccordionGroup>
+
+Add the module to your build:
+
+<CodeGroup>
+
+```gradle build.gradle
+dependencies {
+    implementation "org.apache.lucene:lucene-analysis-common:${luceneVersion}"
+}
+```
+
+```xml pom.xml
+<dependency>
+    <groupId>org.apache.lucene</groupId>
+    <artifactId>lucene-analysis-common</artifactId>
+    <version>${lucene.version}</version>
+</dependency>
+```
+
+</CodeGroup>
+
+Then use it like any other analyzer:
+
+```java
+import org.apache.lucene.analysis.en.EnglishAnalyzer;
+
+Analyzer analyzer = new EnglishAnalyzer();
+IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
+```
+
+## Per-field analysis with PerFieldAnalyzerWrapper
+
+Different fields often need different analysis strategies. A `title` field might use `EnglishAnalyzer`, while a `category` field should use `KeywordAnalyzer` to preserve exact values.
+
+`PerFieldAnalyzerWrapper` (in `lucene-analysis-common`) routes each field to its own analyzer, falling back to a default for any field not explicitly mapped:
+
+```java
+import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper;
+import org.apache.lucene.analysis.en.EnglishAnalyzer;
+import org.apache.lucene.analysis.core.KeywordAnalyzer;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import java.util.HashMap;
+import java.util.Map;
+
+Map<String, Analyzer> analyzerPerField = new HashMap<>();
+analyzerPerField.put("category", new KeywordAnalyzer());
+analyzerPerField.put("title",    new EnglishAnalyzer());
+
+// StandardAnalyzer is used for any field not in the map.
+PerFieldAnalyzerWrapper wrapper =
+    new PerFieldAnalyzerWrapper(new StandardAnalyzer(), analyzerPerField);
+
+IndexWriterConfig iwc = new IndexWriterConfig(wrapper);
+```
+
+<Note>
+  `PerFieldAnalyzerWrapper` can be used for both indexing and query parsing. Pass the same wrapper to your `QueryParser` so that the query-time analysis matches index-time analysis for each field.
+</Note>
+
+## Analysis affects both indexing and querying
+
+When you index a `TextField`, Lucene runs the field value through the analyzer and stores the resulting tokens. When you search that field using a text query, the query string is analyzed the same way before matching against the index.
+
+<Warning>
+  If you index a field with `EnglishAnalyzer` (which stems "running" to "run") but query it with `KeywordAnalyzer` (which treats the input as a single unstemmed token), queries for "running" will not match indexed documents. Always use the same analyzer on both sides.
+</Warning>
+
+`StringField` and `KeywordField` are **not** analyzed at index time. Do not use an analyzing query parser with those field types — use `TermQuery` or `KeywordField.newExactQuery()` directly.
+
+## Writing a custom Analyzer
+
+```java
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.LowerCaseFilter;
+import org.apache.lucene.analysis.StopFilter;
+import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.Tokenizer;
+import org.apache.lucene.analysis.en.PorterStemFilter;
+import org.apache.lucene.analysis.standard.StandardTokenizer;
+import org.apache.lucene.analysis.CharArraySet;
+
+public class MyEnglishAnalyzer extends Analyzer {
+
+    private final CharArraySet stopWords;
+
+    public MyEnglishAnalyzer(CharArraySet stopWords) {
+        this.stopWords = stopWords;
+    }
+
+    @Override
+    protected TokenStreamComponents createComponents(String fieldName) {
+        // 1. Tokenizer splits text on Unicode word boundaries.
+        Tokenizer source = new StandardTokenizer();
+
+        // 2. Build a filter chain.
+        TokenStream filter = new LowerCaseFilter(source);
+        filter = new StopFilter(filter, stopWords);
+        filter = new PorterStemFilter(filter);
+
+        return new TokenStreamComponents(source, filter);
+    }
+}
+```
+
+Use it just like any built-in analyzer:
+
+```java
+CharArraySet stops = new CharArraySet(
+    Arrays.asList("a", "an", "the", "is", "are"), true);
+
+Analyzer analyzer = new MyEnglishAnalyzer(stops);
+IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
+```
+
+<Tip>
+  Analyzers hold per-thread state and are safe to share across threads. Close an analyzer when you no longer need it to release thread-local resources.
+</Tip>

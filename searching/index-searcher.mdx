@@ -1,0 +1,224 @@
+---
+title: IndexSearcher
+description: How to open a reader, execute queries, iterate results, and keep searches up to date with near-real-time patterns.
+keywords: [IndexSearcher, DirectoryReader, TopDocs, ScoreDoc, SearcherManager, NRT search, parallel search]
+---
+
+`IndexSearcher` is the central entry point for all search operations in Lucene. It wraps an `IndexReader` and exposes the `search` family of methods. A single `IndexSearcher` instance is completely thread safe and should be shared across threads rather than created per query.
+
+## Opening a reader and creating a searcher
+
+<Steps>
+  <Step title="Open a DirectoryReader">
+    Open a `DirectoryReader` against the on-disk directory where your index was written.
+
+    ```java
+    import org.apache.lucene.index.DirectoryReader;
+    import org.apache.lucene.store.FSDirectory;
+    import java.nio.file.Paths;
+
+    FSDirectory dir = FSDirectory.open(Paths.get("/path/to/index"));
+    DirectoryReader reader = DirectoryReader.open(dir);
+    ```
+  </Step>
+  <Step title="Create an IndexSearcher">
+    Wrap the reader in an `IndexSearcher`. Reuse this object for all searches as long as the index has not changed.
+
+    ```java
+    import org.apache.lucene.search.IndexSearcher;
+
+    IndexSearcher searcher = new IndexSearcher(reader);
+    ```
+  </Step>
+</Steps>
+
+## Executing a search
+
+### search(Query, int)
+
+The most common search method returns the top `n` hits ranked by relevance score.
+
+```java
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.search.TopDocs;
+
+Query query = new TermQuery(new Term("body", "lucene"));
+TopDocs results = searcher.search(query, 10);
+```
+
+### search(Query, CollectorManager)
+
+For custom collection logic — counting hits, grouping, or faceting — pass a `CollectorManager`.
+
+```java
+import org.apache.lucene.search.CollectorManager;
+import org.apache.lucene.search.TopScoreDocCollector;
+import org.apache.lucene.search.TopScoreDocCollectorManager;
+
+CollectorManager<TopScoreDocCollector, TopDocs> manager =
+    new TopScoreDocCollectorManager(10, null, 1000);
+TopDocs results = searcher.search(query, manager);
+```
+
+<Note>
+`search(Query, Collector)` (without the manager) is deprecated. Prefer `search(Query, CollectorManager)` — it supports concurrent segment-level searching when an `Executor` is configured.
+</Note>
+
+## Iterating TopDocs
+
+`TopDocs` contains:
+- `totalHits` — a `TotalHits` with `value()` (the hit count) and `relation()` (exact or a lower bound).
+- `scoreDocs` — an array of `ScoreDoc`, each carrying `doc` (internal Lucene document id) and `score`.
+
+```java
+import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TotalHits;
+
+TotalHits totalHits = results.totalHits;
+System.out.println("Total hits: " + totalHits.value()
+    + " (" + totalHits.relation() + ")");
+
+for (ScoreDoc hit : results.scoreDocs) {
+    System.out.println("docId=" + hit.doc + "  score=" + hit.score);
+}
+```
+
+<Note>
+By default, `search` counts hits accurately only up to 1,000. If the hit count equals or exceeds that threshold, `relation()` returns `GREATER_THAN_OR_EQUAL_TO`. The `scoreDocs` array is always accurate. Use a `TopScoreDocCollectorManager` configured with a higher threshold when exact counts are required.
+</Note>
+
+## Loading stored fields
+
+Use `storedFields()` to retrieve the source document once you have a `ScoreDoc`.
+
+```java
+import org.apache.lucene.document.Document;
+import org.apache.lucene.index.StoredFields;
+
+StoredFields storedFields = searcher.storedFields();
+for (ScoreDoc hit : results.scoreDocs) {
+    Document doc = storedFields.document(hit.doc);
+    System.out.println(doc.get("title"));
+}
+```
+
+<Tip>
+Obtain a single `StoredFields` instance per thread and reuse it across multiple document loads. The instance returned by `storedFields()` is not thread safe.
+</Tip>
+
+## Near-real-time search
+
+To see recently indexed documents without a full commit, open the reader directly from a live `IndexWriter` and reopen it when the index changes.
+
+```java
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexWriter;
+
+// Open NRT reader from a live writer
+DirectoryReader nrtReader = DirectoryReader.open(writer);
+IndexSearcher nrtSearcher = new IndexSearcher(nrtReader);
+
+// ... perform searches ...
+
+// Later: check for changes and reopen
+DirectoryReader newReader = DirectoryReader.openIfChanged(nrtReader);
+if (newReader != null) {
+    nrtReader.close();          // close old reader
+    nrtReader = newReader;
+    nrtSearcher = new IndexSearcher(nrtReader);
+}
+```
+
+`DirectoryReader.openIfChanged` returns `null` when nothing has changed, making it cheap to call frequently.
+
+## SearcherManager for thread-safe NRT search
+
+`SearcherManager` handles the lifecycle of `IndexSearcher` instances in a multi-threaded environment. It ensures each searcher is closed only after all threads have finished using it.
+
+```java
+import org.apache.lucene.search.SearcherManager;
+import org.apache.lucene.search.SearcherFactory;
+
+// Create from a live IndexWriter (NRT)
+SearcherManager manager = new SearcherManager(writer, new SearcherFactory());
+
+// Acquire, use, and release
+IndexSearcher s = manager.acquire();
+try {
+    TopDocs hits = s.search(query, 10);
+    // process hits
+} finally {
+    manager.release(s);
+    s = null; // do not use s after release
+}
+
+// Refresh in a background thread to pick up new documents
+manager.maybeRefresh();
+
+// Shutdown
+manager.close();
+```
+
+<Warning>
+Never use a searcher after calling `manager.release(s)`. Set the reference to `null` immediately to prevent accidental reuse.
+</Warning>
+
+## Parallel search with ExecutorService
+
+Pass an `Executor` to the `IndexSearcher` constructor to search segments concurrently. Each segment (leaf) is assigned to a task submitted to the executor.
+
+```java
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+ExecutorService executor = Executors.newFixedThreadPool(4);
+IndexSearcher parallelSearcher = new IndexSearcher(reader, executor);
+
+TopDocs results = parallelSearcher.search(query, 10);
+
+// Shut down the executor when done
+executor.shutdown();
+```
+
+<Warning>
+If you use `NIOFSDirectory`, do not call `executor.shutdownNow()`. That method uses `Thread.interrupt`, which can silently close file descriptors under NIO.
+</Warning>
+
+## Complete search example
+
+The following is adapted from the Lucene demo (`SearchFiles.java`):
+
+```java
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.document.Document;
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.StoredFields;
+import org.apache.lucene.queryparser.classic.QueryParser;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.store.FSDirectory;
+import java.nio.file.Paths;
+
+DirectoryReader reader = DirectoryReader.open(
+    FSDirectory.open(Paths.get("/path/to/index")));
+IndexSearcher searcher = new IndexSearcher(reader);
+
+StandardAnalyzer analyzer = new StandardAnalyzer();
+QueryParser parser = new QueryParser("contents", analyzer);
+Query query = parser.parse("apache lucene");
+
+TopDocs results = searcher.search(query, 10);
+System.out.println(results.totalHits.value() + " total matching documents");
+
+StoredFields storedFields = searcher.storedFields();
+for (ScoreDoc hit : results.scoreDocs) {
+    Document doc = storedFields.document(hit.doc);
+    System.out.println(doc.get("path") + "  score=" + hit.score);
+}
+
+reader.close();
+```

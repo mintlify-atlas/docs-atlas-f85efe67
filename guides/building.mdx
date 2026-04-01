@@ -1,0 +1,257 @@
+---
+title: Building from source
+description: How to clone the Apache Lucene repository, build JARs, run tests, generate Javadocs, and set up your IDE.
+keywords: [build, gradle, gradlew, source, jar, javadoc, tests, intellij, eclipse]
+---
+
+This page covers how to build Apache Lucene from source using the Gradle wrapper. No prior Gradle installation is required.
+
+## Requirements
+
+| Requirement | Version |
+|-------------|---------|
+| JDK | 25 or later |
+| Git | Any recent version |
+| Perl | Any recent version (required by some validation tasks) |
+| Python 3 | Any recent version (required by some validation tasks) |
+
+Install JDK 25 from any of the following providers:
+
+<CardGroup cols={2}>
+  <Card title="OpenJDK" icon="java" href="https://jdk.java.net/">
+    The upstream OpenJDK builds from Oracle.
+  </Card>
+  <Card title="Adoptium Temurin" icon="java" href="https://adoptium.net/temurin/releases">
+    Community-maintained Eclipse Temurin builds.
+  </Card>
+  <Card title="Azul Zulu" icon="java" href="https://www.azul.com/downloads/">
+    Azul-supported OpenJDK distribution.
+  </Card>
+  <Card title="Oracle JDK" icon="java" href="https://www.oracle.com/java/technologies/downloads/">
+    Official Oracle JDK downloads.
+  </Card>
+</CardGroup>
+
+## Cloning the repository
+
+<CodeGroup>
+
+```bash Linux / macOS
+git clone https://github.com/apache/lucene
+cd lucene
+```
+
+```bash Windows (preserve line endings)
+git clone --config core.autocrlf=false https://github.com/apache/lucene
+cd lucene
+```
+
+</CodeGroup>
+
+<Warning>
+On Windows, use the `--config core.autocrlf=false` flag. Some files have their checksums verified during the build and will fail if line endings are changed.
+</Warning>
+
+## Using the Gradle wrapper
+
+<Warning>
+Always use the `./gradlew` wrapper script — **never** the `gradle` command that may be installed on your system. Using a different Gradle version than the project requires is a common source of cryptic build failures.
+</Warning>
+
+The Gradle wrapper downloads the correct version of Gradle automatically on first run and caches it locally. On Windows use `gradlew.bat`.
+
+```bash
+# First run — downloads Gradle and creates gradle.properties
+./gradlew helpWorkflow
+```
+
+The wrapper creates a `gradle.properties` file with machine-specific settings. This file can be left as-is in most cases.
+
+## Common build tasks
+
+### Assemble JARs
+
+Build JARs for all Lucene modules:
+
+```bash
+./gradlew assemble
+```
+
+Build the JAR for a single module:
+
+```bash
+./gradlew -p lucene/core assemble
+ls lucene/core/build/libs
+```
+
+### Run all tests and validations
+
+```bash
+./gradlew check
+```
+
+This assembles Lucene and runs all validation tasks including tests. It requires Perl and Python 3.
+
+To run validations but skip tests:
+
+```bash
+./gradlew check -x test
+```
+
+### Run tests only
+
+```bash
+./gradlew test
+```
+
+### Generate Javadoc
+
+Generate API documentation for a single module:
+
+```bash
+./gradlew -p lucene/core javadoc
+ls lucene/core/build/docs
+```
+
+Generate the full documentation site including all Javadocs:
+
+```bash
+./gradlew documentation
+ls lucene/documentation/build/site
+```
+
+### Auto-format code
+
+Reformat all Java source files to comply with google-java-format conventions:
+
+```bash
+./gradlew tidy
+```
+
+Run this before every `./gradlew check` to avoid formatting failures.
+
+### Show workflow help
+
+Print a summary of typical workflow commands:
+
+```bash
+./gradlew helpWorkflow
+```
+
+Print all available help topics:
+
+```bash
+./gradlew help
+```
+
+## Running tests for a specific module
+
+<Tabs>
+  <Tab title="By directory path">
+    ```bash
+    ./gradlew -p lucene/core test
+    ```
+  </Tab>
+  <Tab title="By full project path">
+    ```bash
+    ./gradlew :lucene:core:test
+    ```
+  </Tab>
+  <Tab title="Single test class">
+    ```bash
+    ./gradlew -p lucene/core test --tests TestDemo
+    ```
+  </Tab>
+  <Tab title="Pattern match">
+    ```bash
+    ./gradlew -p lucene/core test --tests "*testFeatureMissing*"
+    ```
+  </Tab>
+</Tabs>
+
+Run all validation checks for a single module:
+
+```bash
+./gradlew -p lucene/core check
+```
+
+## Distribution artifacts
+
+To create all distributable packages, POMs, and a local Maven repository for inspection:
+
+```bash
+./gradlew mavenLocal
+ls -R build/maven-local/
+```
+
+## Testing against a different JVM
+
+By default tests run with the same JVM used by Gradle. To run tests against a different Java installation, set the `runtime.java.home` property or the `RUNTIME_JAVA_HOME` environment variable:
+
+```bash
+./gradlew test -p lucene/core \
+  -Druntime.java.home=/path/to/jdk
+```
+
+You can also set this as the default in your local `gradle.properties`.
+
+## IDE setup
+
+<AccordionGroup>
+
+  <Accordion title="IntelliJ IDEA">
+    Import the project as a Gradle project from the root `build.gradle` file. IntelliJ detects the Gradle project structure automatically.
+
+    By default IntelliJ delegates test runs to the Gradle wrapper, which is correct but can be slower. For faster test iteration you can switch to the built-in runner:
+
+    1. Open **File → Settings → Build, Execution, Deployment → Build Tools → Gradle**.
+    2. Set **"Build and run using"** to **IntelliJ IDEA**.
+    3. Set **"Run tests using"** to **IntelliJ IDEA**.
+
+    <Note>
+    Some Lucene tests are designed to run only via the Gradle wrapper and will fail or be skipped under the built-in runner.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Eclipse">
+    Generate Eclipse project files using Gradle:
+
+    ```bash
+    ./gradlew eclipse
+    ```
+
+    Then import with **File → Import → Existing Project into Workspace**.
+
+    Note: Eclipse does not distinguish between sub-projects and source sets (main/test), so all sources and dependencies appear together in a single project view.
+  </Accordion>
+
+  <Accordion title="VSCode">
+    Run the same Eclipse setup step:
+
+    ```bash
+    ./gradlew eclipse
+    ```
+
+    Then open the root `lucene` directory in VSCode. The Java extension will pick up the project structure.
+  </Accordion>
+
+  <Accordion title="GitHub Codespaces">
+    Fork the `apache/lucene` repository, then browse to [https://github.com/codespaces/new](https://github.com/codespaces/new), select your fork, and click **Create codespace**. The repository opens in a browser-based VS Code environment with Java pre-installed.
+  </Accordion>
+
+</AccordionGroup>
+
+## Quick reference
+
+| Task | Command |
+|------|---------|
+| Build all JARs | `./gradlew assemble` |
+| Run all tests and checks | `./gradlew check` |
+| Run tests only | `./gradlew test` |
+| Test a single module | `./gradlew :lucene:core:test` |
+| Auto-format code | `./gradlew tidy` |
+| Generate Javadoc (core) | `./gradlew -p lucene/core javadoc` |
+| Generate full docs site | `./gradlew documentation` |
+| Create Maven artifacts | `./gradlew mavenLocal` |
+| Show workflow help | `./gradlew helpWorkflow` |
+| Show all help topics | `./gradlew help` |

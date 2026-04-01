@@ -1,80 +1,260 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: 'Quickstart'
+description: 'Add Apache Lucene to a Java project, index documents, and run your first search in under ten minutes.'
+keywords: ['lucene', 'quickstart', 'maven', 'gradle', 'indexing', 'search', 'java']
 ---
 
-## Get started in three steps
+This guide walks you through a minimal but complete Lucene workflow: declare a dependency, create an in-memory index, add documents, and query them.
 
-Get your documentation site running locally and make your first customization.
+<Info>
+  These examples require **Java 25** and **Lucene 11.0.0**. Lucene 11 targets Java 25 as its minimum platform.
+</Info>
 
-### Step 1: Set up your local environment
+<Steps>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Step title="Add the dependency">
 
-### Step 2: Deploy your changes
+Lucene is published to Maven Central. Add `lucene-core` to your build file. For full-text search with a query parser, also add `lucene-queryparser`.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<CodeGroup>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```xml pom.xml
+<dependencies>
+  <dependency>
+    <groupId>org.apache.lucene</groupId>
+    <artifactId>lucene-core</artifactId>
+    <version>11.0.0</version>
+  </dependency>
+  <dependency>
+    <groupId>org.apache.lucene</groupId>
+    <artifactId>lucene-analysis-common</artifactId>
+    <version>11.0.0</version>
+  </dependency>
+  <dependency>
+    <groupId>org.apache.lucene</groupId>
+    <artifactId>lucene-queryparser</artifactId>
+    <version>11.0.0</version>
+  </dependency>
+</dependencies>
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+```gradle build.gradle
+dependencies {
+    implementation 'org.apache.lucene:lucene-core:11.0.0'
+    implementation 'org.apache.lucene:lucene-analysis-common:11.0.0'
+    implementation 'org.apache.lucene:lucene-queryparser:11.0.0'
+}
+```
 
-### Step 3: Go live
+</CodeGroup>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<Tip>
+  `lucene-core` contains `IndexWriter`, `IndexSearcher`, `Directory`, and the document/field types. The `lucene-analysis-common` module provides `StandardAnalyzer`. The `lucene-queryparser` module provides `QueryParser` used in step 4.
+</Tip>
+
+</Step>
+
+<Step title="Create an index">
+
+A `Directory` is Lucene's abstraction for index storage. Use `ByteBuffersDirectory` for an in-memory index during development or testing. Use `FSDirectory.open(path)` to persist an index to disk, as shown in the [demo's IndexFiles.java](https://github.com/apache/lucene/blob/main/lucene/demo/src/java/org/apache/lucene/demo/IndexFiles.java).
+
+```java
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.store.ByteBuffersDirectory;
+import org.apache.lucene.store.Directory;
+
+// In-memory directory — no files written to disk
+Directory directory = new ByteBuffersDirectory();
+
+// StandardAnalyzer tokenizes, lowercases, and removes common stop words
+StandardAnalyzer analyzer = new StandardAnalyzer();
+IndexWriterConfig config = new IndexWriterConfig(analyzer);
+
+IndexWriter writer = new IndexWriter(directory, config);
+```
+
+To write to disk instead, replace the directory line:
+
+```java
+import org.apache.lucene.store.FSDirectory;
+import java.nio.file.Paths;
+
+Directory directory = FSDirectory.open(Paths.get("/path/to/index"));
+```
+
+</Step>
+
+<Step title="Add documents">
+
+A `Document` is a collection of `Field`s. Choose the right field type for each piece of data:
+
+- `TextField` — tokenized full-text content (body, title, description). The analyzer runs on the value.
+- `StringField` — exact-match string stored and indexed as a single token (IDs, paths, categories). Not analyzed.
+- `LongField` — numeric value suitable for range queries and sorting.
+
+```java
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
+import org.apache.lucene.document.StringField;
+import org.apache.lucene.document.TextField;
+
+// First document
+Document doc1 = new Document();
+doc1.add(new StringField("id", "1", Field.Store.YES));
+doc1.add(new TextField("title", "Apache Lucene Getting Started", Field.Store.YES));
+doc1.add(new TextField("body",
+    "Lucene is a high-performance search library written in Java.",
+    Field.Store.YES));
+writer.addDocument(doc1);
+
+// Second document
+Document doc2 = new Document();
+doc2.add(new StringField("id", "2", Field.Store.YES));
+doc2.add(new TextField("title", "Indexing and Searching with Lucene", Field.Store.YES));
+doc2.add(new TextField("body",
+    "IndexWriter writes documents into segments. IndexSearcher queries them.",
+    Field.Store.YES));
+writer.addDocument(doc2);
+
+// Commit makes the documents visible to new readers
+writer.commit();
+writer.close();
+```
+
+<Note>
+  `Field.Store.YES` stores the raw value so you can retrieve it from search results. `Field.Store.NO` indexes the field for searching but does not store it — useful when you only need to know *which* document matched, not the original value.
+</Note>
+
+</Step>
+
+<Step title="Search the index">
+
+Open a `DirectoryReader` to get a read-only view of the index, then wrap it in an `IndexSearcher`. Use `QueryParser` to parse a query string against a default field, or construct `Query` objects directly.
+
+```java
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.StoredFields;
+import org.apache.lucene.queryparser.classic.QueryParser;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TopDocs;
+
+// Open the index for reading
+DirectoryReader reader = DirectoryReader.open(directory);
+IndexSearcher searcher = new IndexSearcher(reader);
+
+// Parse a query against the "body" field
+QueryParser parser = new QueryParser("body", new StandardAnalyzer());
+Query query = parser.parse("Lucene search library");
+
+// Search and retrieve the top 10 results
+TopDocs results = searcher.search(query, 10);
+System.out.println("Found " + results.totalHits.value() + " document(s).");
+
+// Retrieve stored field values for each hit
+StoredFields storedFields = searcher.storedFields();
+for (ScoreDoc hit : results.scoreDocs) {
+    Document doc = storedFields.document(hit.doc);
+    System.out.printf("  score=%.4f  id=%s  title=%s%n",
+        hit.score,
+        doc.get("id"),
+        doc.get("title"));
+}
+
+reader.close();
+```
+
+Running this prints something like:
+
+```text
+Found 2 document(s).
+  score=0.4855  id=1  title=Apache Lucene Getting Started
+  score=0.3128  id=2  title=Indexing and Searching with Lucene
+```
+
+</Step>
+
+</Steps>
+
+## Complete minimal example
+
+The following is a single self-contained class combining all four steps above:
+
+```java LuceneQuickstart.java
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
+import org.apache.lucene.document.StringField;
+import org.apache.lucene.document.TextField;
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.StoredFields;
+import org.apache.lucene.queryparser.classic.QueryParser;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.store.ByteBuffersDirectory;
+import org.apache.lucene.store.Directory;
+
+public class LuceneQuickstart {
+
+    public static void main(String[] args) throws Exception {
+        // 1. Create an in-memory index
+        Directory directory = new ByteBuffersDirectory();
+        StandardAnalyzer analyzer = new StandardAnalyzer();
+        IndexWriterConfig config = new IndexWriterConfig(analyzer);
+
+        // 2. Write documents
+        try (IndexWriter writer = new IndexWriter(directory, config)) {
+            Document doc1 = new Document();
+            doc1.add(new StringField("id", "1", Field.Store.YES));
+            doc1.add(new TextField("title", "Apache Lucene Getting Started", Field.Store.YES));
+            doc1.add(new TextField("body",
+                "Lucene is a high-performance search library written in Java.",
+                Field.Store.YES));
+            writer.addDocument(doc1);
+
+            Document doc2 = new Document();
+            doc2.add(new StringField("id", "2", Field.Store.YES));
+            doc2.add(new TextField("title", "Indexing and Searching with Lucene", Field.Store.YES));
+            doc2.add(new TextField("body",
+                "IndexWriter writes documents into segments. IndexSearcher queries them.",
+                Field.Store.YES));
+            writer.addDocument(doc2);
+        } // writer.close() commits and flushes
+
+        // 3. Search
+        try (DirectoryReader reader = DirectoryReader.open(directory)) {
+            IndexSearcher searcher = new IndexSearcher(reader);
+            QueryParser parser = new QueryParser("body", new StandardAnalyzer());
+            Query query = parser.parse("Lucene search library");
+
+            TopDocs results = searcher.search(query, 10);
+            System.out.println("Found " + results.totalHits.value() + " document(s).");
+
+            StoredFields storedFields = searcher.storedFields();
+            for (ScoreDoc hit : results.scoreDocs) {
+                Document doc = storedFields.document(hit.doc);
+                System.out.printf("  score=%.4f  id=%s  title=%s%n",
+                    hit.score, doc.get("id"), doc.get("title"));
+            }
+        }
+    }
+}
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Core concepts" icon="book-open" href="/core-concepts">
+    Learn about indexes, segments, analyzers, and query types before building a production system.
+  </Card>
+  <Card title="Demo source code" icon="code" href="https://github.com/apache/lucene/tree/main/lucene/demo/src/java/org/apache/lucene/demo">
+    Study the full IndexFiles and SearchFiles demos in the Lucene repository.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

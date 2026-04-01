@@ -1,122 +1,84 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Apache Lucene",
+  "theme": "palm",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#049c8d"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/1af40883-1c93-4ae7-9ada-57787c6d6289.png",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/apache/lucene"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/apache/lucene"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "core-concepts"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Indexing",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "indexing/documents-and-fields",
+              "indexing/index-writer",
+              "indexing/analysis"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Searching",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "searching/index-searcher",
+              "searching/query-types",
+              "searching/sorting-and-scoring"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Modules",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "modules/query-parser",
+              "modules/faceting",
+              "modules/highlighting",
+              "modules/suggest",
+              "modules/vectors"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/codecs",
+              "advanced/geo-spatial",
+              "advanced/performance"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Guides",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Migration & Contributing",
             "pages": [
-              "api-reference/introduction"
-            ]
-          },
-          {
-            "group": "Endpoint examples",
-            "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "guides/migration",
+              "guides/contributing",
+              "guides/building"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

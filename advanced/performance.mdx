@@ -1,0 +1,322 @@
+---
+title: "Performance tuning"
+description: "Practical settings for IndexWriter, merge policy, directory choice, query caching, and NRT search to get the best throughput and latency from Lucene."
+keywords: ["performance", "tuning", "IndexWriter", "TieredMergePolicy", "MMapDirectory", "LRUQueryCache", "NRT", "SearcherManager", "DocValues", "merge scheduler"]
+---
+
+This page covers the knobs most likely to move the needle on a real workload. Defaults are reasonable starting points, but high-volume indexing and low-latency search each have different optimal configurations.
+
+## IndexWriter buffer tuning
+
+`IndexWriterConfig` controls when buffered documents are flushed to a new segment on disk.
+
+```java
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+
+IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
+
+// Flush when buffered documents consume this much RAM (default: 16 MB).
+// Larger values produce fewer, bigger segments and reduce merge pressure at
+// the cost of higher heap usage during indexing.
+config.setRAMBufferSizeMB(256.0);
+
+// Alternatively, flush after this many documents regardless of RAM.
+// Disabled by default (IndexWriter flushes by RAM usage).
+// config.setMaxBufferedDocs(50_000);
+```
+
+<Tip>
+`RAMBufferSizeMB` and `setMaxBufferedDocs` are independent triggers — whichever limit is reached first causes a flush. Using `RAMBufferSizeMB` alone is almost always the right choice because document sizes vary widely.
+</Tip>
+
+The per-thread hard limit `RAMPerThreadHardLimitMB` (default: 1945 MB) acts as a safety valve that triggers a forced flush on a single indexing thread before it exhausts 32-bit internal addressing. You generally do not need to change it.
+
+## TieredMergePolicy
+
+`TieredMergePolicy` is the default merge policy. It merges segments of approximately equal byte size, subject to a budget of allowed segments per tier.
+
+```java
+import org.apache.lucene.index.TieredMergePolicy;
+
+TieredMergePolicy mergePolicy = new TieredMergePolicy();
+
+// Maximum size a merged segment may reach (default: 5 GB).
+// Reduce this if you want more, smaller segments — useful for
+// indexes where NRT refresh latency matters.
+mergePolicy.setMaxMergedSegmentMB(2048.0);
+
+// Allowed segments per tier (default: 8.0). Lowering this value
+// makes the index merge more aggressively and produces fewer segments,
+// at the cost of more write amplification.
+mergePolicy.setSegmentsPerTier(10.0);
+
+// Maximum percentage of deleted docs before a segment is eligible for
+// forced-delete merging (default: 20%). Lower this to reclaim space
+// from deletes sooner.
+mergePolicy.setDeletesPctAllowed(10.0);
+
+// Target number of slices for concurrent search (default: 1).
+// Setting this higher allows IndexSearcher to divide work across threads
+// and produces a corresponding number of segments.
+mergePolicy.setTargetSearchConcurrency(4);
+
+config.setMergePolicy(mergePolicy);
+```
+
+<Note>
+`TieredMergePolicy` can merge non-adjacent segments. If monotonically increasing doc IDs are required (e.g. for time-ordered data), use `LogByteSizeMergePolicy` or `LogDocMergePolicy` instead.
+</Note>
+
+### forceMerge vs. natural merging
+
+Calling `IndexWriter.forceMerge(maxNumSegments)` bypasses the `setMaxMergedSegmentMB` constraint when the two settings conflict. For example, if you have fifty 1 GB segments and call `forceMerge(5)`, Lucene will produce five segments of up to ~12 GB each to satisfy the segment count target.
+
+## ConcurrentMergeScheduler
+
+`ConcurrentMergeScheduler` (the default) runs each merge in its own background thread.
+
+```java
+import org.apache.lucene.index.ConcurrentMergeScheduler;
+
+ConcurrentMergeScheduler cms = new ConcurrentMergeScheduler();
+
+// Set both limits explicitly. maxThreadCount <= maxMergeCount.
+// maxThreadCount: how many merges run simultaneously.
+// maxMergeCount: total queued + running merges before indexing threads stall.
+cms.setMaxMergesAndThreads(/* maxMergeCount */ 6, /* maxThreadCount */ 3);
+
+config.setMergeScheduler(cms);
+```
+
+`AUTO_DETECT_MERGES_AND_THREADS` (the default) sets `maxThreadCount` to `max(1, min(4, cpuCoreCount/2))` and `maxMergeCount` to `maxThreadCount + 5`. On a machine with a spinning disk pass `setDefaultMaxMergesAndThreads(false)` to use more conservative defaults.
+
+## Directory choice
+
+The `Directory` implementation determines how Lucene reads index files. Choose based on your operating system and access pattern.
+
+<Tabs>
+  <Tab title="MMapDirectory (recommended)">
+    Uses `mmap` for reads and delegates to `FSIndexOutput` for writes. The OS page cache is leveraged directly, avoiding an extra copy from kernel to JVM heap. This is the best choice on 64-bit JVMs with sufficient virtual address space.
+
+    ```java
+    import org.apache.lucene.store.MMapDirectory;
+    import java.nio.file.Path;
+
+    Path indexPath = Path.of("/var/lucene/index");
+    MMapDirectory dir = new MMapDirectory(indexPath);
+    ```
+
+    On Linux and macOS, Lucene invokes `madvise()` to advise the kernel on paging behaviour. To enable native access in a modularised application:
+
+    ```
+    --enable-native-access=org.apache.lucene.core
+    ```
+
+    For classpath-based applications use:
+
+    ```
+    --enable-native-access=ALL-UNNAMED
+    ```
+
+    `MMapDirectory` uses `java.lang.foreign.MemorySegment` (available since Java 21) to safely unmap files immediately after closing an `IndexInput`, preventing the stale-mapping bugs common with the legacy `sun.misc.Unsafe` approach.
+  </Tab>
+  <Tab title="FSDirectory (auto-select)">
+    `FSDirectory.open()` picks the best implementation for your platform automatically. It returns `MMapDirectory` on most 64-bit platforms.
+
+    ```java
+    import org.apache.lucene.store.FSDirectory;
+    import java.nio.file.Path;
+
+    // Let Lucene choose the best implementation
+    FSDirectory dir = FSDirectory.open(Path.of("/var/lucene/index"));
+    ```
+  </Tab>
+  <Tab title="NIOFSDirectory">
+    Uses `java.nio` `FileChannel` reads. Suitable when `mmap` is unavailable or the address space is constrained (e.g. 32-bit JVMs or containerised environments with very low `vm.max_map_count`).
+
+    ```java
+    import org.apache.lucene.store.NIOFSDirectory;
+    import java.nio.file.Path;
+
+    NIOFSDirectory dir = new NIOFSDirectory(Path.of("/var/lucene/index"));
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+If your application uses `Thread.interrupt()` or `Future.cancel(boolean)`, avoid `MMapDirectory` — an interrupt while the thread is blocked on I/O immediately closes the underlying `FileChannel` and makes the directory unusable. Use `NIOFSDirectory` (or the legacy `RAFDirectory` from the `misc` module) instead.
+</Warning>
+
+### Preloading files into memory
+
+`MMapDirectory` can preload selected files into physical memory immediately on open, reducing cold-cache latency at the cost of slower startup:
+
+```java
+import org.apache.lucene.store.MMapDirectory;
+import org.apache.lucene.index.IndexFileNames;
+import java.util.function.BiPredicate;
+
+MMapDirectory dir = new MMapDirectory(Path.of("/var/lucene/index"));
+
+// Preload .dvd (doc values data) and .tim (term dictionary) files
+dir.setPreload((fileName, context) ->
+    fileName.endsWith(".dvd") || fileName.endsWith(".tim"));
+```
+
+## Query caching with LRUQueryCache
+
+`IndexSearcher` uses an `LRUQueryCache` by default. You can replace or configure it to suit your workload:
+
+```java
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.LRUQueryCache;
+import org.apache.lucene.search.QueryCachingPolicy;
+import org.apache.lucene.search.UsageTrackingQueryCachingPolicy;
+
+// Cache at most 256 distinct queries; use up to 50 MB of heap.
+// Share this instance across all searchers and indices.
+final int maxCachedQueries = 256;
+final long maxRamBytesUsed = 50 * 1024L * 1024L; // 50 MB
+
+LRUQueryCache queryCache =
+    new LRUQueryCache(maxCachedQueries, maxRamBytesUsed);
+
+// Only cache queries that have been seen at least a few times
+QueryCachingPolicy cachingPolicy = new UsageTrackingQueryCachingPolicy();
+
+IndexSearcher searcher = new IndexSearcher(reader);
+searcher.setQueryCache(queryCache);
+searcher.setQueryCachingPolicy(cachingPolicy);
+```
+
+<Note>
+The cache works best when shared across multiple searcher instances on the same index. Cache eviction runs in linear time with the number of segments that have cache entries, so avoid sharing one cache across many unrelated indices.
+</Note>
+
+Monitor cache effectiveness using the statistics methods:
+
+```java
+long hits   = queryCache.getHitCount();
+long misses = queryCache.getMissCount();
+long size   = queryCache.getCacheSize();   // number of cached entries
+long ram    = queryCache.ramBytesUsed();   // bytes consumed
+```
+
+## NRT search with SearcherManager
+
+Near-real-time (NRT) search makes newly indexed documents visible without a full `commit()`. `SearcherManager` handles the lifecycle of `IndexSearcher` instances across multiple threads and periodic refreshes.
+
+```java
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.SearcherManager;
+import org.apache.lucene.index.IndexWriter;
+
+// Create once, keep alive for the lifetime of the index
+SearcherManager searcherManager = new SearcherManager(writer, null);
+
+// In a background thread, call this periodically (e.g. every second)
+searcherManager.maybeRefresh();
+
+// In each search thread:
+IndexSearcher searcher = searcherManager.acquire();
+try {
+    // execute queries using searcher
+} finally {
+    searcherManager.release(searcher);
+    searcher = null; // do not use after release
+}
+```
+
+### NRT vs. commit-based search tradeoffs
+
+<CardGroup cols={2}>
+  <Card title="NRT (DirectoryReader.open(writer))" icon="bolt">
+    New documents visible within milliseconds of indexing. No I/O required for a refresh — only in-memory segment state is exchanged. Best for interactive or near-real-time workloads.
+  </Card>
+  <Card title="Commit-based (DirectoryReader.open(directory))" icon="hard-drive">
+    Reader only sees fully committed, durable segments. Required when the reader and writer are in separate processes or JVMs. Each refresh requires opening a new reader from disk.
+  </Card>
+</CardGroup>
+
+Calling `maybeRefresh()` on a hot path (e.g. before every query) adds latency to the requests that need to reopen the reader. Prefer calling it from a dedicated background thread on a fixed schedule.
+
+## DocValues vs. stored fields
+
+<AccordionGroup>
+  <Accordion title="Use DocValues for sorting and aggregation">
+    Doc values are stored in a columnar format optimised for sequential access. Sorting, faceting, and field collapsing over doc values are significantly faster than loading the same values from stored fields, which require random access per document.
+
+    ```java
+    import org.apache.lucene.document.NumericDocValuesField;
+    import org.apache.lucene.document.StoredField;
+
+    // For sort/aggregation — columnar, fast sequential access
+    doc.add(new NumericDocValuesField("price", 1999L));
+
+    // For retrieval — only add if you need the raw value at query time
+    doc.add(new StoredField("price", 1999L));
+    ```
+  </Accordion>
+  <Accordion title="NumericDocValues vs. stored fields for numeric data">
+    `NumericDocValuesField` stores one `long` per document in a dense array. Access is O(1) and the data is often already in the OS page cache after the first scan. Stored fields are compressed blocks that must be decompressed and decoded to retrieve a single value.
+
+    Use `NumericDocValuesField` whenever you need to:
+    - Sort search results by a numeric field
+    - Compute aggregates (sum, min, max) across result sets
+    - Use the value as a scoring factor in a custom `Similarity` or `FunctionQuery`
+
+    Reserve `StoredField` for values that the application needs to display verbatim and that are not used for sorting or scoring.
+  </Accordion>
+  <Accordion title="SortedNumericDocValues for multi-valued numeric fields">
+    When a document may have multiple values for one numeric field, use `SortedNumericDocValuesField`. It stores all values for a document in sorted order and supports min/max selection at query time.
+
+    ```java
+    import org.apache.lucene.document.SortedNumericDocValuesField;
+
+    // Multiple prices for the same product
+    doc.add(new SortedNumericDocValuesField("price", 999L));
+    doc.add(new SortedNumericDocValuesField("price", 1299L));
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Stored fields compression
+
+`Lucene104Codec` supports two compression modes for stored fields, selected at index-creation time:
+
+```java
+import org.apache.lucene.codecs.lucene104.Lucene104Codec;
+import org.apache.lucene.index.IndexWriterConfig;
+
+// BEST_SPEED (default): lower CPU cost, moderate compression
+IndexWriterConfig fastConfig = new IndexWriterConfig(analyzer);
+fastConfig.setCodec(new Lucene104Codec(Lucene104Codec.Mode.BEST_SPEED));
+
+// BEST_COMPRESSION: higher CPU cost, smaller index on disk
+IndexWriterConfig compactConfig = new IndexWriterConfig(analyzer);
+compactConfig.setCodec(new Lucene104Codec(Lucene104Codec.Mode.BEST_COMPRESSION));
+```
+
+`BEST_COMPRESSION` is a good choice when I/O bandwidth is scarce (e.g. network-attached storage or HDDs) and CPU is plentiful.
+
+## Summary checklist
+
+<AccordionGroup>
+  <Accordion title="Indexing throughput">
+    - Increase `RAMBufferSizeMB` (e.g. 256–512 MB) to produce larger initial segments.
+    - Use `ConcurrentMergeScheduler.setMaxMergesAndThreads()` to match your core count.
+    - Disable `setUseCompoundFile(false)` for batch indexing to avoid extra I/O during the compound-file creation step.
+  </Accordion>
+  <Accordion title="Search latency">
+    - Use `MMapDirectory` so the OS page cache serves reads without JVM heap pressure.
+    - Keep the segment count low with a well-tuned `TieredMergePolicy`.
+    - Warm the `SearcherManager` after each refresh using `SearcherFactory`.
+    - Size `LRUQueryCache` to cover your hot query set.
+  </Accordion>
+  <Accordion title="Index size">
+    - Switch to `Lucene104Codec.Mode.BEST_COMPRESSION`.
+    - Lower `TieredMergePolicy.setDeletesPctAllowed()` to reclaim deleted-doc space sooner.
+    - Avoid storing fields that are only needed for sorting — use `NumericDocValuesField` instead.
+  </Accordion>
+</AccordionGroup>

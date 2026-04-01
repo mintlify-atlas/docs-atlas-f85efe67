@@ -1,0 +1,213 @@
+---
+title: "IndexWriter"
+description: "Creating and managing a Lucene index"
+---
+
+`IndexWriter` is the entry point for all write operations on a Lucene index. It creates and maintains an index stored in a `Directory`. Only one `IndexWriter` may be open on a given directory at a time — attempting to open a second writer throws `LockObtainFailedException`.
+
+## Opening a writer
+
+You need two objects before constructing an `IndexWriter`:
+
+- A `Directory` pointing to where the index lives on disk (or in memory).
+- An `IndexWriterConfig` that supplies an `Analyzer` and controls open mode, RAM buffer size, merge policy, and more.
+
+<Steps>
+  <Step title="Open a Directory">
+    ```java
+    import org.apache.lucene.store.Directory;
+    import org.apache.lucene.store.FSDirectory;
+    import java.nio.file.Paths;
+
+    Directory dir = FSDirectory.open(Paths.get("/path/to/index"));
+    ```
+  </Step>
+  <Step title="Create an IndexWriterConfig">
+    `IndexWriterConfig` is constructed with an `Analyzer` and configured via a fluent API. All setters return `this`.
+
+    ```java
+    import org.apache.lucene.analysis.standard.StandardAnalyzer;
+    import org.apache.lucene.index.IndexWriterConfig;
+    import org.apache.lucene.index.IndexWriterConfig.OpenMode;
+
+    IndexWriterConfig iwc = new IndexWriterConfig(new StandardAnalyzer());
+
+    // CREATE overwrites any existing index.
+    // CREATE_OR_APPEND opens an existing index or creates one if absent.
+    // APPEND opens an existing index and fails if none exists.
+    iwc.setOpenMode(OpenMode.CREATE_OR_APPEND);
+
+    // Increase the RAM buffer for faster bulk indexing.
+    // Raise the JVM heap accordingly (e.g. -Xmx512m).
+    // iwc.setRAMBufferSizeMB(256.0);
+    ```
+  </Step>
+  <Step title="Construct the IndexWriter">
+    ```java
+    import org.apache.lucene.index.IndexWriter;
+
+    try (IndexWriter writer = new IndexWriter(dir, iwc)) {
+        // add, update, and delete documents here
+    } // close() commits and releases the write lock
+    ```
+
+    `IndexWriter` implements `Closeable`. When `DEFAULT_COMMIT_ON_CLOSE` is `true` (the default), `close()` performs a final commit.
+  </Step>
+</Steps>
+
+## Adding, updating, and deleting documents
+
+<CodeGroup>
+
+```java addDocument
+// Add a new document unconditionally.
+Document doc = new Document();
+doc.add(new KeywordField("id", "42", Field.Store.YES));
+doc.add(new TextField("body", "hello world", Field.Store.NO));
+
+long seqNo = writer.addDocument(doc);
+```
+
+```java updateDocument
+// updateDocument atomically deletes all documents matching the term,
+// then adds the new document. Equivalent to delete-then-add but
+// guaranteed to be atomic within a single segment flush.
+Term idTerm = new Term("id", "42");
+writer.updateDocument(idTerm, doc);
+```
+
+```java deleteDocuments
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.TermQuery;
+
+// Delete by term (exact match on an indexed field).
+writer.deleteDocuments(new Term("id", "42"));
+
+// Delete by query (any query type is supported).
+writer.deleteDocuments(new TermQuery(new Term("status", "deleted")));
+```
+
+</CodeGroup>
+
+<Note>
+  Every mutating method returns a `long` sequence number. You can use sequence numbers to determine which changes are reflected in a given commit point. Sequence numbers are not persisted and are only valid within a single `IndexWriter` instance.
+</Note>
+
+## Committing and rolling back
+
+Changes are buffered in RAM and periodically flushed to the `Directory`. A flush does **not** make changes visible to readers — only `commit()` does.
+
+```java
+// Make all buffered changes durable and visible to new IndexReader instances.
+writer.commit();
+
+// Discard all changes since the last commit.
+// The writer remains open and usable after rollback.
+writer.rollback();
+```
+
+<Warning>
+  If the JVM crashes after a `flush()` but before a `commit()`, the unflushed data is lost. Always call `commit()` (or rely on `close()` to commit) before treating data as durable.
+</Warning>
+
+## Near-real-time search
+
+To search documents that have been added but not yet committed, open a reader directly from the writer using `DirectoryReader.open(IndexWriter)`. To pick up subsequent changes without a full reopen, use `DirectoryReader.openIfChanged()`.
+
+```java
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.search.IndexSearcher;
+
+// Open an NRT reader from the writer (includes unflushed changes).
+DirectoryReader reader = DirectoryReader.open(writer);
+IndexSearcher searcher = new IndexSearcher(reader);
+
+// ... perform searches ...
+
+// After more documents are added, refresh to see them.
+DirectoryReader newReader = DirectoryReader.openIfChanged(reader);
+if (newReader != null) {
+    reader.close();
+    reader = newReader;
+    searcher = new IndexSearcher(reader);
+}
+```
+
+<Tip>
+  `DirectoryReader.openIfChanged()` returns `null` if nothing has changed since the reader was opened, avoiding an unnecessary reopen.
+</Tip>
+
+## Merge policy: TieredMergePolicy
+
+By default, `IndexWriterConfig` uses `TieredMergePolicy`. This policy organizes segments into tiers by size and merges segments within the same tier together. Key properties:
+
+- **Non-contiguous merges**: segments being merged do not have to be adjacent, so docIDs can reorder across commits. If monotonic docIDs matter, switch to `LogByteSizeMergePolicy`.
+- **Background merges**: the default `ConcurrentMergeScheduler` runs merges in background threads, so `addDocument()` calls are not blocked.
+- **`forceMerge(1)`**: collapses the index to a single segment. Only worthwhile for a static index because it is expensive. Never call it on an actively changing index.
+
+```java
+import org.apache.lucene.index.TieredMergePolicy;
+
+TieredMergePolicy tmp = new TieredMergePolicy();
+tmp.setMaxMergeAtOnce(10);       // max segments merged in one pass
+tmp.setSegmentsPerTier(10.0);    // target number of segments per tier
+iwc.setMergePolicy(tmp);
+```
+
+## Thread safety
+
+`IndexWriter` is thread-safe. Multiple threads may call `addDocument()`, `updateDocument()`, and `deleteDocuments()` concurrently on the same writer instance. Lucene uses internal per-thread document buffers (`DocumentsWriterPerThread`) to minimise contention.
+
+<Warning>
+  Do not share an `IndexWriterConfig` instance across multiple `IndexWriter` instances. Constructing a second writer with the same config object throws `IllegalStateException`.
+</Warning>
+
+## Complete example
+
+```java
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
+import org.apache.lucene.document.KeywordField;
+import org.apache.lucene.document.TextField;
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.IndexWriterConfig.OpenMode;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.store.FSDirectory;
+import java.nio.file.Paths;
+
+try (FSDirectory dir = FSDirectory.open(Paths.get("/path/to/index"))) {
+
+    IndexWriterConfig iwc = new IndexWriterConfig(new StandardAnalyzer());
+    iwc.setOpenMode(OpenMode.CREATE_OR_APPEND);
+
+    try (IndexWriter writer = new IndexWriter(dir, iwc)) {
+
+        // Add a document.
+        Document doc = new Document();
+        doc.add(new KeywordField("id", "1", Field.Store.YES));
+        doc.add(new TextField("title", "Apache Lucene", Field.Store.YES));
+        writer.addDocument(doc);
+
+        // Update a document by its id term.
+        Document updated = new Document();
+        updated.add(new KeywordField("id", "1", Field.Store.YES));
+        updated.add(new TextField("title", "Apache Lucene (updated)", Field.Store.YES));
+        writer.updateDocument(new Term("id", "1"), updated);
+
+        // Delete by term.
+        writer.deleteDocuments(new Term("id", "2"));
+
+        // Commit makes changes visible to new readers.
+        writer.commit();
+
+        // Open an NRT reader to search uncommitted changes.
+        try (DirectoryReader reader = DirectoryReader.open(writer)) {
+            System.out.println("Docs in index: " + reader.numDocs());
+        }
+
+    } // close() performs a final commit
+}
+```

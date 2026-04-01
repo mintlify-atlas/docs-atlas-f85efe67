@@ -1,0 +1,145 @@
+---
+title: "Highlighting"
+description: "Extract and highlight matching passages in search results"
+---
+
+The highlighting module extracts and formats the portions of a document that match a query, so you can show users exactly why a result was returned. The module contains two distinct APIs: the modern `UnifiedHighlighter` and the legacy `Highlighter`.
+
+## Dependency
+
+<CodeGroup>
+
+```xml Maven
+<dependency>
+  <groupId>org.apache.lucene</groupId>
+  <artifactId>lucene-highlighter</artifactId>
+  <version>${lucene.version}</version>
+</dependency>
+```
+
+```gradle Gradle
+implementation "org.apache.lucene:lucene-highlighter:${luceneVersion}"
+```
+
+</CodeGroup>
+
+## UnifiedHighlighter (recommended)
+
+`UnifiedHighlighter` is the current, preferred API. It supports multiple offset strategies — postings offsets, term vectors, or re-analysis — and selects the best available strategy automatically per field.
+
+It treats each document as a mini-corpus, scores passages the way Lucene scores documents, and uses a `BreakIterator` (defaulting to sentence boundaries) to define passage boundaries.
+
+### How it works
+
+`UnifiedHighlighter` can retrieve offsets from three sources, chosen in preference order:
+
+1. **Postings with offsets** — index the field with `IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS` for best performance.
+2. **Term vectors with offsets** — index the field with `FieldType.setStoreTermVectorOffsets(true)`.
+3. **Re-analysis** — works on any stored field but is slower.
+
+### Setup
+
+Build the highlighter using its `Builder`:
+
+```java
+import org.apache.lucene.search.uhighlight.UnifiedHighlighter;
+
+UnifiedHighlighter highlighter = new UnifiedHighlighter.Builder(searcher, analyzer)
+    .withMaxLength(10_000)        // max characters to examine per field value
+    .build();
+```
+
+### Highlight a single field
+
+`highlight()` returns one snippet string per document in the `TopDocs` result, in the same order as `topDocs.scoreDocs`.
+
+```java
+import org.apache.lucene.search.uhighlight.UnifiedHighlighter;
+
+// Run the search
+Query query    = new QueryParser("body", analyzer).parse("apache lucene");
+TopDocs hits   = searcher.search(query, 10);
+
+// Build the highlighter
+UnifiedHighlighter uh = new UnifiedHighlighter.Builder(searcher, analyzer).build();
+
+// Get one highlighted snippet per result document
+String[] snippets = uh.highlight("body", query, hits);
+for (int i = 0; i < snippets.length; i++) {
+    System.out.println(hits.scoreDocs[i].doc + ": " + snippets[i]);
+}
+```
+
+### Highlight multiple fields at once
+
+```java
+String[] fields   = {"title", "body"};
+int[] maxPassages = {1, 3};
+
+Map<String, String[]> highlights =
+    uh.highlightFields(fields, query, hits, maxPassages);
+
+for (ScoreDoc sd : hits.scoreDocs) {
+    System.out.println("title: " + highlights.get("title")[/* index */0]);
+    System.out.println("body:  " + highlights.get("body")[/* index */0]);
+}
+```
+
+### Controlling the number of passages
+
+Pass `maxPassages` to `highlight()` to control how many top-ranked snippets are concatenated into the returned string:
+
+```java
+// Return up to 3 passages for each document
+String[] snippets = uh.highlight("body", query, hits, 3);
+```
+
+### PassageFormatter
+
+By default, matching terms are wrapped in `<b>` tags and passages are separated by `" ... "`. You can customize this by providing a custom `PassageFormatter` to the builder:
+
+```java
+import org.apache.lucene.search.uhighlight.PassageFormatter;
+
+PassageFormatter myFormatter = new DefaultPassageFormatter("<em>", "</em>", "\n…\n", false);
+
+UnifiedHighlighter uh = new UnifiedHighlighter.Builder(searcher, analyzer)
+    .withFormatter(field -> myFormatter)
+    .build();
+```
+
+`PassageFormatter` receives a `Passage[]` (each holding start/end offsets and term match positions) and the original field text, and returns a formatted `Object` (usually a `String`).
+
+## Classic Highlighter (legacy)
+
+The original `Highlighter` class (`org.apache.lucene.search.highlight.Highlighter`) remains available for backward compatibility. It requires storing term vectors and operates on a single document string at a time.
+
+```java
+import org.apache.lucene.search.highlight.Highlighter;
+import org.apache.lucene.search.highlight.QueryScorer;
+import org.apache.lucene.search.highlight.SimpleHTMLFormatter;
+import org.apache.lucene.search.highlight.SimpleFragmenter;
+
+QueryScorer scorer        = new QueryScorer(query);
+SimpleHTMLFormatter fmt   = new SimpleHTMLFormatter("<em>", "</em>");
+Highlighter highlighter   = new Highlighter(fmt, scorer);
+highlighter.setTextFragmenter(new SimpleFragmenter(100));
+
+String text    = storedFields.document(docId).get("body");
+TokenStream ts = TokenSources.getTokenStream("body", termVectors, text, analyzer, -1);
+String result  = highlighter.getBestFragment(ts, text);
+```
+
+<Warning>
+The classic `Highlighter` requires term vectors with offsets and positions to be stored at index time. This adds significant index size. Prefer `UnifiedHighlighter` for new applications.
+</Warning>
+
+## Choosing an offset source
+
+| Source | Index option | Performance | Field type |
+|---|---|---|---|
+| Postings offsets | `DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS` | Fastest | `TextField` |
+| Term vector offsets | `setStoreTermVectorOffsets(true)` | Fast, larger index | Any stored |
+| Re-analysis | None required | Slowest, no extra index size | Any stored |
+
+`UnifiedHighlighter` selects the best available source automatically. You can force a specific strategy by subclassing.

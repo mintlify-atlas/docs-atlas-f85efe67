@@ -1,0 +1,176 @@
+---
+title: "Codecs"
+description: "How Lucene's pluggable codec system controls the on-disk format of every part of the index."
+keywords: ["codec", "postings format", "doc values", "stored fields", "per-field", "custom codec"]
+---
+
+A **Codec** is the component that controls how every part of a Lucene segment is written to and read from disk. Swapping the codec changes the binary format of the index without touching any search or analysis logic.
+
+Lucene discovers codec implementations through Java's [ServiceLoader](https://docs.oracle.com/en/java/docs/api/java.base/java/util/ServiceLoader.html) SPI mechanism. The codec name is written into every segment file so Lucene can load the right implementation when the segment is opened later.
+
+## Built-in codecs
+
+<CardGroup cols={2}>
+  <Card title="Lucene104Codec" icon="database">
+    The current default. Used automatically by every new `IndexWriterConfig` unless you override it. Combines `Lucene104PostingsFormat`, `Lucene90DocValuesFormat`, `Lucene90StoredFieldsFormat`, and more.
+  </Card>
+  <Card title="SimpleTextCodec" icon="file-text">
+    Writes every index structure as human-readable plain text. Extremely slow and large — intended only for debugging and understanding the index format.
+  </Card>
+</CardGroup>
+
+<Warning>
+`SimpleTextCodec` is marked `@lucene.experimental` and is **for recreational use only**. Never use it in production.
+</Warning>
+
+## Codec sub-formats
+
+`Codec` is an abstract class that delegates each responsibility to a dedicated format object. You can extend `FilterCodec` to override only the sub-formats you care about.
+
+| Method | Responsibility |
+|---|---|
+| `postingsFormat()` | Term dictionary and postings lists (doc IDs, positions, offsets, payloads) |
+| `docValuesFormat()` | Per-document numeric, binary, sorted, and sorted-set doc values |
+| `storedFieldsFormat()` | Stored field values retrieved at search time |
+| `termVectorsFormat()` | Term vectors (per-document term/position/offset data) |
+| `normsFormat()` | Per-field length normalization factors |
+| `liveDocsFormat()` | Bitset of non-deleted documents within a segment |
+| `compoundFormat()` | Optional bundling of segment files into a single `.cfs` compound file |
+| `pointsFormat()` | BKD-tree encoded numeric and geo points |
+| `knnVectorsFormat()` | HNSW-indexed dense float vectors for k-NN search |
+
+## Setting a codec on IndexWriterConfig
+
+`IndexWriterConfig.setCodec()` accepts any `Codec` instance. The codec is applied to all new segments flushed or merged by that writer.
+
+```java
+import org.apache.lucene.codecs.Codec;
+import org.apache.lucene.codecs.lucene104.Lucene104Codec;
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+
+// Use the default codec explicitly (BEST_SPEED stored-field compression)
+IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
+config.setCodec(new Lucene104Codec(Lucene104Codec.Mode.BEST_SPEED));
+```
+
+To switch to the highest compression for stored fields, use `Mode.BEST_COMPRESSION`:
+
+```java
+IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
+config.setCodec(new Lucene104Codec(Lucene104Codec.Mode.BEST_COMPRESSION));
+```
+
+<Tip>
+`Lucene104Codec.Mode.BEST_COMPRESSION` uses a slower but more compact algorithm for stored fields. It is a good choice for large indexes where I/O is the bottleneck and CPU is available.
+</Tip>
+
+## PerFieldPostingsFormat
+
+The default `Lucene104Codec` uses `PerFieldPostingsFormat` internally to route each field to a specific `PostingsFormat`. This lets you use, for example, a memory-mapped format for a high-traffic field while keeping others on the default disk-based format.
+
+Override `getPostingsFormatForField` in a `Lucene104Codec` subclass to apply per-field routing:
+
+```java
+import org.apache.lucene.codecs.PostingsFormat;
+import org.apache.lucene.codecs.lucene104.Lucene104Codec;
+
+public class MyCodec extends Lucene104Codec {
+
+    private final PostingsFormat blockTreeFormat =
+            PostingsFormat.forName("Lucene104");
+
+    @Override
+    public PostingsFormat getPostingsFormatForField(String field) {
+        // Route a specific high-traffic field to a named format;
+        // fall back to the default for everything else.
+        if ("title".equals(field)) {
+            return PostingsFormat.forName("DirectPostings");
+        }
+        return super.getPostingsFormatForField(field);
+    }
+}
+```
+
+<Note>
+The format name written into the index must match a registered `PostingsFormat` implementation at read time. If you use a custom format, register it via Java SPI (`META-INF/services/org.apache.lucene.codecs.PostingsFormat`) in your JAR.
+</Note>
+
+Similarly, override `getDocValuesFormatForField` to apply per-field doc values formats, and `getKnnVectorsFormatForField` to tune HNSW vector parameters per field.
+
+## Writing a custom PostingsFormat
+
+<Steps>
+  <Step title="Extend PostingsFormat">
+    Subclass `org.apache.lucene.codecs.PostingsFormat` and supply a unique name that will be written into the index.
+
+    ```java
+    import org.apache.lucene.codecs.FieldsConsumer;
+    import org.apache.lucene.codecs.FieldsProducer;
+    import org.apache.lucene.codecs.PostingsFormat;
+    import org.apache.lucene.index.SegmentReadState;
+    import org.apache.lucene.index.SegmentWriteState;
+
+    public class MyPostingsFormat extends PostingsFormat {
+
+        public MyPostingsFormat() {
+            super("MyPostings"); // name written into the index
+        }
+
+        @Override
+        public FieldsConsumer fieldsConsumer(SegmentWriteState state)
+                throws java.io.IOException {
+            // Return your write-side implementation
+            throw new UnsupportedOperationException("implement me");
+        }
+
+        @Override
+        public FieldsProducer fieldsProducer(SegmentReadState state)
+                throws java.io.IOException {
+            // Return your read-side implementation
+            throw new UnsupportedOperationException("implement me");
+        }
+    }
+    ```
+  </Step>
+  <Step title="Register via SPI">
+    Create `META-INF/services/org.apache.lucene.codecs.PostingsFormat` in your JAR and add your fully-qualified class name:
+
+    ```
+    com.example.MyPostingsFormat
+    ```
+  </Step>
+  <Step title="Wire it up">
+    Plug your format into a codec subclass and set that codec on `IndexWriterConfig`.
+
+    ```java
+    public class MyCodec extends Lucene104Codec {
+        @Override
+        public PostingsFormat getPostingsFormatForField(String field) {
+            return new MyPostingsFormat();
+        }
+    }
+
+    IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
+    config.setCodec(new MyCodec());
+    ```
+  </Step>
+</Steps>
+
+## Checking the default codec
+
+You can inspect or change the process-wide default codec that new `IndexWriterConfig` instances receive:
+
+```java
+// Read the current default
+Codec defaultCodec = Codec.getDefault(); // "Lucene104" in Lucene 11
+
+// Override the process-wide default (affects all new IndexWriterConfigs)
+Codec.setDefault(new Lucene104Codec(Lucene104Codec.Mode.BEST_COMPRESSION));
+
+// Look up a codec by the name stored in the index
+Codec byName = Codec.forName("SimpleText");
+
+// List all available codec names on the classpath
+java.util.Set<String> names = Codec.availableCodecs();
+```

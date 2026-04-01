@@ -1,0 +1,107 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Apache Lucene",
+  "projectDescription": "A high-performance, full-featured Java library for full-text search and information retrieval.",
+  "theme": "palm",
+  "primaryColor": "#049c8d",
+  "lightColor": null,
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "core-concepts"
+            ]
+          },
+          {
+            "group": "Indexing",
+            "pages": [
+              "indexing/documents-and-fields",
+              "indexing/index-writer",
+              "indexing/analysis"
+            ]
+          },
+          {
+            "group": "Searching",
+            "pages": [
+              "searching/index-searcher",
+              "searching/query-types",
+              "searching/sorting-and-scoring"
+            ]
+          },
+          {
+            "group": "Modules",
+            "pages": [
+              "modules/query-parser",
+              "modules/faceting",
+              "modules/highlighting",
+              "modules/suggest",
+              "modules/vectors"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/codecs",
+              "advanced/geo-spatial",
+              "advanced/performance"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Migration & Contributing",
+            "pages": [
+              "guides/migration",
+              "guides/contributing",
+              "guides/building"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "High-performance full-text indexing and search",
+    "Rich query language including boolean, fuzzy, phrase, range, and vector queries",
+    "Flexible text analysis pipeline with tokenizers, filters, and language-specific analyzers",
+    "Faceting and aggregation for drill-down navigation",
+    "KNN vector search (HNSW) for semantic/AI-powered retrieval",
+    "Geo-spatial search with lat/lon and shape queries",
+    "Highlighting of matched terms in search results",
+    "Autocomplete and spell-check via the Suggest module",
+    "Custom codecs for pluggable storage formats",
+    "Near-real-time search with concurrent indexing and searching"
+  ],
+  "publicApiSurface": [
+    "org.apache.lucene.index.IndexWriter",
+    "org.apache.lucene.index.DirectoryReader",
+    "org.apache.lucene.search.IndexSearcher",
+    "org.apache.lucene.analysis.Analyzer",
+    "org.apache.lucene.document.Document",
+    "org.apache.lucene.document.Field",
+    "org.apache.lucene.search.BooleanQuery",
+    "org.apache.lucene.search.TermQuery",
+    "org.apache.lucene.search.FuzzyQuery",
+    "org.apache.lucene.search.PhraseQuery",
+    "org.apache.lucene.search.KnnFloatVectorQuery",
+    "org.apache.lucene.search.KnnByteVectorQuery",
+    "org.apache.lucene.queryparser.classic.QueryParser",
+    "org.apache.lucene.facet.FacetsCollector",
+    "org.apache.lucene.search.highlight.Highlighter",
+    "org.apache.lucene.search.suggest.Lookup",
+    "org.apache.lucene.store.FSDirectory",
+    "org.apache.lucene.store.MMapDirectory",
+    "org.apache.lucene.index.IndexWriterConfig",
+    "org.apache.lucene.index.TieredMergePolicy"
+  ]
+}

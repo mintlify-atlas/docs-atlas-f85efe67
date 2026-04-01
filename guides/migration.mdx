@@ -1,0 +1,273 @@
+---
+title: Migration guide
+description: Instructions for upgrading Apache Lucene across major versions, with a focus on the Lucene 10.x to 11.0 migration.
+keywords: [migration, upgrade, breaking changes, lucene 11, index format]
+---
+
+This guide covers breaking API and behavior changes introduced in Apache Lucene 11.0, as well as the updated index upgrade policy that allows safe upgrades across multiple major versions.
+
+## Migrating from Lucene 10.x to Lucene 11.0
+
+### Java 25 requirement
+
+<Warning>
+Lucene 11.0 requires **Java 25** as the minimum platform version (GITHUB#15215). You must upgrade your JDK before upgrading Lucene. Builds also require Gradle 9.x, which is managed automatically by the Gradle wrapper.
+</Warning>
+
+Lucene 11.0 drops support for all JDK versions below 25. All security manager and `java.security`-related code has also been removed, as it is effectively dead in Java 24+.
+
+### Relaxed index upgrade policy
+
+Starting with Lucene 11.0.0, the index upgrade policy has been relaxed to allow safe upgrades across multiple major versions without reindexing, as long as no format breaks occur (GITHUB#13797).
+
+#### What changed
+
+- `Version.MIN_SUPPORTED_MAJOR` is now manually maintained rather than auto-computed as `LATEST.major - 1`.
+- It is set to **10** for Lucene 11.0.0, meaning indexes created with Lucene 10.x can be opened directly.
+- `MIN_SUPPORTED_MAJOR` will only be incremented when actual incompatible format changes are introduced.
+
+#### Two-tier version policy
+
+The upgrade policy works at two levels:
+
+1. **Index opening policy** — an index can be opened if its creation version is >= `MIN_SUPPORTED_MAJOR`.
+2. **Codec reader policy** — segments can only be read directly if they were written by the current or previous major version.
+
+#### Upgrade scenarios
+
+<AccordionGroup>
+  <Accordion title="Scenario 1: No format breaks (wider upgrade span)">
+    An index created with Lucene 10.x can be opened directly in Lucene 11.x, 12.x, 13.x, and 14.x, as long as `MIN_SUPPORTED_MAJOR` stays at or below 10.
+
+    - Simply open the index with the new version; segments are upgraded gradually through normal merging.
+    - Optionally call `forceMerge()` or use `UpgradeIndexMergePolicy` to rewrite all segments to the latest format immediately.
+
+    **Important:** you still only get one upgrade per index lifetime. Once `MIN_SUPPORTED_MAJOR` is bumped above 10, an index with a creation version of 10 becomes unopenable and must be reindexed.
+  </Accordion>
+
+  <Accordion title="Scenario 2: Format breaks occur">
+    If a major version introduces incompatible format changes, `MIN_SUPPORTED_MAJOR` will be bumped. Indexes created before the new minimum will throw `IndexFormatTooOldException`. Full reindexing is required.
+  </Accordion>
+
+  <Accordion title="Scenario 3: After consuming your upgrade">
+    An index created with Lucene 10.x that is successfully opened with Lucene 14.x still has a creation version of 10 — this never changes. When Lucene 15+ bumps `MIN_SUPPORTED_MAJOR` above 10, the index becomes unopenable. You must reindex to continue using newer Lucene versions.
+  </Accordion>
+</AccordionGroup>
+
+#### Opening and upgrading an index
+
+```java
+// Opening an index created with Lucene 10.x in Lucene 11.x+
+try (Directory dir = FSDirectory.open(indexPath)) {
+    // Succeeds when MIN_SUPPORTED_MAJOR <= 10
+    try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        // Index can be read normally
+    }
+
+    // Optional: rewrite all segments to the latest format immediately
+    try (IndexWriter writer = new IndexWriter(dir, config)) {
+        writer.forceMerge(1);
+    }
+}
+```
+
+Enhanced error messages clearly indicate whether the index creation version is below `MIN_SUPPORTED_MAJOR` (reindex required) or whether segments are too old to read directly (sequential upgrade required).
+
+---
+
+### Breaking API changes
+
+<AccordionGroup>
+
+  <Accordion title="PriorityQueue.remove() removed (GITHUB#15309)">
+    <Warning>
+      `PriorityQueue.remove()` has been removed entirely. There is no drop-in replacement in the core class.
+    </Warning>
+
+    If you need `remove()`, implement it yourself in a subclass. The heap internals — `size`, `upHeap`, and `downHeap` — are protected members of `PriorityQueue` and are accessible from subclasses.
+
+    ```java
+    // Before
+    pq.remove(element);
+
+    // After — implement in a subclass using protected members
+    public class MyQueue<T> extends PriorityQueue<T> {
+        public boolean remove(T element) {
+            for (int i = 1; i <= size; i++) {
+                if (heap[i].equals(element)) {
+                    heap[i] = heap[size--];
+                    if (i <= size) downHeap(i);
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="TieredMergePolicy.setMaxMergeAtOnce() removed (GITHUB#14165)">
+    <Warning>
+      `TieredMergePolicy#setMaxMergeAtOnce` has been removed with no replacement. `TieredMergePolicy` no longer bounds the number of segments that may be merged together.
+    </Warning>
+
+    Remove any call to `setMaxMergeAtOnce` or `getMaxMergeAtOnce` from your code.
+
+    ```java
+    // Before
+    TieredMergePolicy mp = new TieredMergePolicy();
+    mp.setMaxMergeAtOnce(10);
+
+    // After — remove the call entirely
+    TieredMergePolicy mp = new TieredMergePolicy();
+    ```
+  </Accordion>
+
+  <Accordion title="SortField.setMissingValue() removed (GITHUB#15486)">
+    <Warning>
+      `SortField.setMissingValue()` has been removed. Missing values must now be configured through `SortField` constructor methods, as they are final.
+    </Warning>
+
+    ```java
+    // Before
+    SortField sf = new SortField("price", SortField.Type.FLOAT);
+    sf.setMissingValue(Float.MAX_VALUE);
+
+    // After — pass the missing value in the constructor
+    SortField sf = new SortField("price", SortField.Type.FLOAT, false);
+    // Use the appropriate constructor overload that accepts a missingValue
+    ```
+  </Accordion>
+
+  <Accordion title="DocIdSet.all and DocIdSet.bits removed (GITHUB#14288, GITHUB#14290)">
+    <Warning>
+      The public static `DocIdSet#all` method and the `DocIdSet#bits` method have both been removed.
+    </Warning>
+
+    - Replace uses of `DocIdSet#all` with `DocIdSetIterator.all(maxDoc)`.
+    - Remove any calls to `DocIdSet#bits`; the `Bits` view of a `DocIdSet` is no longer part of the public API.
+  </Accordion>
+
+  <Accordion title="CheckIndex deprecated parameters removed (GITHUB#11023)">
+    The `-slow` and `-fast` parameters for the `CheckIndex` command-line tool have been removed.
+
+    The former `-fast` behaviour (checksum checks only) is now the default. Use the new `-level X` parameter to control check depth:
+
+    | Level | Checks performed |
+    |-------|-----------------|
+    | `1` (default) | Checksum checks only |
+    | `2` | Level 1 checks plus logical integrity checks |
+    | `3` | Level 2 checks plus slow checks |
+
+    ```bash
+    # Before
+    java -cp lucene-core.jar org.apache.lucene.index.CheckIndex -slow /path/to/index
+
+    # After
+    java -cp lucene-core.jar org.apache.lucene.index.CheckIndex -level 3 /path/to/index
+    ```
+  </Accordion>
+
+  <Accordion title="Operations.concatenate/union two-arg variants removed (GITHUB#15762)">
+    The deprecated two-argument overloads `Operations.concatenate(Automaton, Automaton)` and `Operations.union(Automaton, Automaton)` have been removed.
+
+    Use the `List` or `Collection` variants instead:
+
+    ```java
+    // Before
+    Automaton result = Operations.union(a1, a2);
+
+    // After
+    Automaton result = Operations.union(List.of(a1, a2));
+    ```
+  </Accordion>
+
+  <Accordion title="Operations.complement() and Operations.minus() deprecated">
+    <Warning>
+      `Operations.complement()` (GITHUB#15763) and `Operations.minus()` (GITHUB#15755) are now deprecated and will be removed in Lucene 12.
+    </Warning>
+
+    `complement()` can be slow and is not recommended for production use. `minus()` has been moved to `AutomatonTestUtil.minus()` for testing purposes only. Migrate away from both methods before upgrading to Lucene 12.
+  </Accordion>
+
+  <Accordion title="Compound file configuration API moved (GITHUB#15295)">
+    APIs for configuring compound file creation thresholds have moved from merge policies to `CompoundFormat`. The old ratio-based threshold has been replaced with fixed size and document-count thresholds.
+
+    Default thresholds are:
+    - **64 MB** for size-based merge policies (e.g., `TieredMergePolicy`)
+    - **65,536 documents** for document-count-based merge policies (e.g., `LogDocMergePolicy`)
+
+    <CodeGroup>
+
+    ```java before.java
+    TieredMergePolicy mp = new TieredMergePolicy();
+    mp.setNoCFSRatio(0.0);
+    mp.setMaxCFSSegmentSizeMB(512);
+    IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
+    iwc.setMergePolicy(mp);
+    mp.getNoCFSRatio();
+    mp.getMaxCFSSegmentSizeMB();
+    ```
+
+    ```java after.java
+    IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
+    iwc.getConfig().getCodec().compoundFormat().setShouldUseCompoundFile(false);
+    iwc.getConfig().getCodec().compoundFormat().setMaxCFSSegmentSizeMB(512);
+    iwc.getConfig().getCodec().compoundFormat().getShouldUseCompoundFile();
+    iwc.getConfig().getCodec().compoundFormat().getMaxCFSSegmentSizeMB();
+    ```
+
+    </CodeGroup>
+  </Accordion>
+
+  <Accordion title="Query caching disabled by default (GITHUB#14187)">
+    Query caching is now disabled by default. To restore caching behaviour, add the following to a static initialization block in your application:
+
+    ```java
+    int maxCachedQueries = 1_000;
+    long maxRamBytesUsed = 50 * 1024 * 1024; // 50 MB
+    IndexSearcher.setDefaultQueryCache(
+        new LRUQueryCache(maxCachedQueries, maxRamBytesUsed));
+    ```
+  </Accordion>
+
+  <Accordion title="Dutch stemmer replaced (Snowball upgrade)">
+    <Warning>
+      If your index was built using the Lucene 10 `DutchStemmer`, search results will be incorrect after upgrading because the stemmer implementation has changed. A reindex is required for correct results.
+    </Warning>
+
+    Snowball has replaced the "Dutch" stemmer with the "Kraaij-Pohlmann" stemmer. Lucene 11 now ships two Dutch stemmers:
+
+    - `DutchStemmer` — now the Kraaij-Pohlmann stemmer.
+    - `Dutch_porterStemmer` — the original `DutchStemmer` from Lucene 10 and earlier.
+
+    To retain pre-Lucene-11 stemming behaviour without reindexing, replace `DutchStemmer` with `Dutch_porterStemmer` in your analyzer configuration.
+  </Accordion>
+
+  <Accordion title="DataInput.readGroupVInt() optimization hook removed (GITHUB#15116)">
+    Any subclass of `DataInput` that overrides `readGroupVInt()` must remove that override.
+
+    Instead, ensure that subclasses of `IndexInput` implement `RandomAccessInput`. Pure `DataInput` subclasses cannot be optimized because they cannot offer random access and seeking.
+  </Accordion>
+
+  <Accordion title="MatchAllDocs and MatchNoDocs are singletons">
+    `MatchAllDocsQuery` and `MatchNoDocsQuery` should now be obtained via their `INSTANCE` field rather than constructing new objects. The constructors are deprecated and will be removed in a future release.
+
+    ```java
+    // Before
+    Query q = new MatchAllDocsQuery();
+
+    // After
+    Query q = MatchAllDocsQuery.INSTANCE;
+    ```
+  </Accordion>
+
+</AccordionGroup>
+
+---
+
+## Migrating from Lucene 9.x to Lucene 10.0
+
+For the Lucene 9 → 10 migration, key changes included the removal of deprecated stored-fields APIs, the introduction of `CollectorManager` as the preferred search API, records-based data classes, the replacement of `IOContext` flags with `ReadAdvice`, and the removal of `TimeLimitingCollector`.
+
+Refer to the full [MIGRATE.md](https://github.com/apache/lucene/blob/main/lucene/MIGRATE.md) in the source repository for the complete list of changes across all major versions.

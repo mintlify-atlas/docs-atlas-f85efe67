@@ -1,0 +1,176 @@
+---
+title: "Faceting"
+description: "Add drill-down navigation and facet counts to search"
+---
+
+The faceting module provides category counts and drill-down navigation over search results. It supports taxonomy-based facets (hierarchical categories stored in a separate taxonomy index) and range facets (numeric ranges computed at query time).
+
+## Dependency
+
+<CodeGroup>
+
+```xml Maven
+<dependency>
+  <groupId>org.apache.lucene</groupId>
+  <artifactId>lucene-facet</artifactId>
+  <version>${lucene.version}</version>
+</dependency>
+```
+
+```gradle Gradle
+implementation "org.apache.lucene:lucene-facet:${luceneVersion}"
+```
+
+</CodeGroup>
+
+## Core classes
+
+<AccordionGroup>
+  <Accordion title="FacetsConfig">
+    `FacetsConfig` holds per-dimension configuration such as whether a dimension is hierarchical or multi-valued. You must pass it to every `config.build(taxoWriter, doc)` call at index time and to `FastTaxonomyFacetCounts` at search time.
+
+    ```java
+    FacetsConfig config = new FacetsConfig();
+    config.setHierarchical("Publish Date", true);
+    ```
+  </Accordion>
+  <Accordion title="FacetField">
+    `FacetField` tags a document with a category path. Hierarchical paths are expressed as multiple string arguments.
+
+    ```java
+    doc.add(new FacetField("Author", "Lisa"));
+    doc.add(new FacetField("Publish Date", "2010", "10", "15"));
+    // Build before adding to IndexWriter:
+    indexWriter.addDocument(config.build(taxoWriter, doc));
+    ```
+  </Accordion>
+  <Accordion title="FacetsCollector and FacetsCollectorManager">
+    `FacetsCollector` captures the documents that match a query so that facet counts can be computed over those documents. Use `FacetsCollectorManager` (the concurrent-safe variant) with `IndexSearcher`.
+
+    ```java
+    FacetsCollectorManager fcm = new FacetsCollectorManager();
+    FacetsCollector fc =
+        FacetsCollectorManager.search(searcher, query, 10, fcm).facetsCollector();
+    ```
+  </Accordion>
+  <Accordion title="FastTaxonomyFacetCounts">
+    Given a `TaxonomyReader`, a `FacetsConfig`, and a `FacetsCollector`, this class computes the count for every category that appeared in the result set.
+
+    ```java
+    Facets facets = new FastTaxonomyFacetCounts(taxoReader, config, fc);
+    FacetResult authors = facets.getTopChildren(10, "Author");
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Indexing taxonomy facets
+
+A taxonomy facet index requires two `Directory` instances: one for the main index and one for the taxonomy.
+
+```java
+Directory indexDir = FSDirectory.open(Paths.get("/path/to/index"));
+Directory taxoDir  = FSDirectory.open(Paths.get("/path/to/taxo"));
+
+FacetsConfig config = new FacetsConfig();
+config.setHierarchical("Publish Date", true);
+
+IndexWriter indexWriter = new IndexWriter(
+    indexDir, new IndexWriterConfig(new StandardAnalyzer()));
+DirectoryTaxonomyWriter taxoWriter = new DirectoryTaxonomyWriter(taxoDir);
+
+Document doc = new Document();
+doc.add(new FacetField("Author", "Bob"));
+doc.add(new FacetField("Publish Date", "2010", "10", "15"));
+indexWriter.addDocument(config.build(taxoWriter, doc));
+
+IOUtils.close(indexWriter, taxoWriter);
+```
+
+## Searching and counting facets
+
+```java
+DirectoryReader indexReader = DirectoryReader.open(indexDir);
+IndexSearcher searcher      = new IndexSearcher(indexReader);
+TaxonomyReader taxoReader   = new DirectoryTaxonomyReader(taxoDir);
+
+FacetsCollectorManager fcm = new FacetsCollectorManager();
+FacetsCollector fc =
+    FacetsCollectorManager.search(searcher, new MatchAllDocsQuery(), 10, fcm)
+        .facetsCollector();
+
+Facets facets = new FastTaxonomyFacetCounts(taxoReader, config, fc);
+
+FacetResult authorResult      = facets.getTopChildren(10, "Author");
+FacetResult publishDateResult = facets.getTopChildren(10, "Publish Date");
+
+IOUtils.close(indexReader, taxoReader);
+```
+
+## Numeric range facets
+
+For numeric fields, use `LongRangeFacetCounts` instead of a taxonomy writer. Store the field as a `NumericDocValuesField` (for facet counting) and optionally as a `LongPoint` (for drill-down filtering).
+
+```java
+// Indexing
+doc.add(new NumericDocValuesField("timestamp", epochSeconds));
+doc.add(new LongPoint("timestamp", epochSeconds));
+
+// Define ranges
+long nowSec = System.currentTimeMillis() / 1000L;
+LongRange PAST_HOUR      = new LongRange("Past hour",      nowSec - 3600,      true, nowSec, true);
+LongRange PAST_SIX_HOURS = new LongRange("Past six hours", nowSec - 6 * 3600,  true, nowSec, true);
+LongRange PAST_DAY       = new LongRange("Past day",       nowSec - 24 * 3600, true, nowSec, true);
+
+// Searching
+FacetsCollector fc =
+    FacetsCollectorManager.search(
+            searcher, new MatchAllDocsQuery(), 10, new FacetsCollectorManager())
+        .facetsCollector();
+
+Facets facets = new LongRangeFacetCounts("timestamp", fc,
+    PAST_HOUR, PAST_SIX_HOURS, PAST_DAY);
+FacetResult result = facets.getAllChildren("timestamp");
+```
+
+## DrillDownQuery
+
+`DrillDownQuery` constrains a search to documents that match a specific facet value, enabling breadcrumb-style navigation.
+
+```java
+// Browse all documents, then narrow to Publish Date/2010
+DrillDownQuery q = new DrillDownQuery(config);
+q.add("Publish Date", "2010");
+
+FacetsCollector fc =
+    FacetsCollectorManager.search(searcher, q, 10, new FacetsCollectorManager())
+        .facetsCollector();
+
+Facets facets = new FastTaxonomyFacetCounts(taxoReader, config, fc);
+FacetResult authorsIn2010 = facets.getTopChildren(10, "Author");
+```
+
+For numeric range drill-down, add a range query directly:
+
+```java
+DrillDownQuery q = new DrillDownQuery(config);
+q.add("timestamp", LongPoint.newRangeQuery("timestamp", PAST_SIX_HOURS.min, PAST_SIX_HOURS.max));
+TopDocs hits = searcher.search(q, 10);
+```
+
+## DrillSideways
+
+`DrillSideways` computes facet counts for all dimensions even when the user has drilled into one dimension, so that the sidebar always shows the full set of options for un-selected dimensions.
+
+```java
+DrillDownQuery q = new DrillDownQuery(config);
+q.add("Publish Date", "2010");
+
+DrillSideways ds = new DrillSideways(searcher, config, taxoReader);
+DrillSideways.DrillSidewaysResult result = ds.search(q, 10);
+
+List<FacetResult> facets = result.facets.getAllDims(10);
+```
+
+<Note>
+Always close the `TaxonomyReader` and `TaxonomyWriter` alongside the main index reader/writer. The taxonomy index is a separate data store and must be kept in sync with the main index.
+</Note>

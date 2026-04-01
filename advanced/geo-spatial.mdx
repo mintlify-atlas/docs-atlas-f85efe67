@@ -1,0 +1,306 @@
+---
+title: "Geo-spatial search"
+description: "Index and query geographic points and shapes using LatLonPoint, LatLonShape, and their cartesian XY equivalents."
+keywords: ["geo", "latitude", "longitude", "distance", "polygon", "bounding box", "LatLonPoint", "LatLonShape", "XYPoint", "XYShape"]
+---
+
+Lucene provides two coordinate systems for geo-spatial indexing:
+
+| System | Classes | Use case |
+|---|---|---|
+| **LatLon (WGS84 geodetic)** | `LatLonPoint`, `LatLonShape`, `LatLonDocValuesField` | Real-world latitude/longitude on the Earth's surface |
+| **XY (cartesian)** | `XYPointField`, `XYShape`, `XYDocValuesField` | Flat 2-D space — floor plans, game maps, projected coordinates |
+
+<Note>
+Both systems encode coordinates with some loss of precision. For `LatLonPoint` the error is approximately 4.19×10⁻⁸ degrees in latitude and 8.38×10⁻⁸ degrees in longitude.
+</Note>
+
+## LatLonPoint — indexed point queries
+
+`LatLonPoint` stores a latitude/longitude pair as two 4-byte integers in a BKD tree. It supports fast range and distance queries but does **not** support sorting by distance on its own — add a companion `LatLonDocValuesField` for that.
+
+### Indexing locations
+
+```java
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.LatLonPoint;
+import org.apache.lucene.document.LatLonDocValuesField;
+import org.apache.lucene.document.StoredField;
+import org.apache.lucene.index.IndexWriter;
+
+Document doc = new Document();
+
+// Indexed point — enables distance/box/polygon queries
+doc.add(new LatLonPoint("location", 48.8566, 2.3522)); // Paris
+
+// Doc values — enables sort-by-distance
+doc.add(new LatLonDocValuesField("location", 48.8566, 2.3522));
+
+// Stored field — enables retrieving the raw value at search time
+doc.add(new StoredField("lat", 48.8566));
+doc.add(new StoredField("lon", 2.3522));
+
+writer.addDocument(doc);
+```
+
+### Bounding box query
+
+```java
+import org.apache.lucene.document.LatLonPoint;
+import org.apache.lucene.search.Query;
+
+// Match all points inside a bounding box (lat/lon bounds)
+Query boxQuery = LatLonPoint.newBoxQuery(
+    "location",
+    /* minLat */ 48.0,
+    /* maxLat */ 49.5,
+    /* minLon */ 1.5,
+    /* maxLon */ 3.5
+);
+```
+
+The box may cross the dateline — Lucene rewrites it automatically into a disjunction of two boxes when `maxLongitude < minLongitude`.
+
+### Distance query
+
+```java
+import org.apache.lucene.document.LatLonPoint;
+import org.apache.lucene.search.Query;
+
+// Match all points within 50 km of Paris
+Query distanceQuery = LatLonPoint.newDistanceQuery(
+    "location",
+    48.8566,  // center latitude
+    2.3522,   // center longitude
+    50_000.0  // radius in meters
+);
+```
+
+### Polygon query
+
+```java
+import org.apache.lucene.document.LatLonPoint;
+import org.apache.lucene.geo.Polygon;
+import org.apache.lucene.search.Query;
+
+// CCW polygon — lats and lons must have the same length and at least 4 entries
+// (first and last point must be identical to close the ring)
+Polygon polygon = new Polygon(
+    new double[]{48.0, 49.0, 49.0, 48.0, 48.0},   // latitudes
+    new double[]{1.5,  1.5,  3.5,  3.5,  1.5}     // longitudes
+);
+
+Query polyQuery = LatLonPoint.newPolygonQuery("location", polygon);
+```
+
+## LatLonDocValuesField — sorting by distance
+
+`LatLonDocValuesField` stores the same encoded lat/lon pair as a `SORTED_NUMERIC` doc value. Use `LatLonDocValuesField.newDistanceSort()` to create a `SortField` that orders results by ascending distance from a given point.
+
+```java
+import org.apache.lucene.document.LatLonDocValuesField;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.MatchAllDocsQuery;
+import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.TopFieldDocs;
+
+// Build a sort: closest to Paris first
+SortField distanceSort =
+    LatLonDocValuesField.newDistanceSort("location", 48.8566, 2.3522);
+
+Sort sort = new Sort(distanceSort);
+
+// The returned FieldDoc.fields[0] contains the distance in meters as a Double
+TopFieldDocs hits =
+    searcher.search(new MatchAllDocsQuery(), 10, sort);
+```
+
+<Tip>
+Always add **both** a `LatLonPoint` (for filtering) and a `LatLonDocValuesField` (for sorting) if you need to filter by area **and** sort by distance. They can share the same field name.
+</Tip>
+
+## LatLonShape — indexing complex geometries
+
+`LatLonShape` supports indexing and querying polygons, lines, and points as geo shapes. Internally, polygons are tessellated into triangles using an ear-clipping algorithm; the triangles are stored as point values in a BKD tree.
+
+### Indexing shapes
+
+```java
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
+import org.apache.lucene.document.LatLonShape;
+import org.apache.lucene.geo.Line;
+import org.apache.lucene.geo.Polygon;
+
+Document doc = new Document();
+
+// Index a polygon
+Polygon polygon = new Polygon(
+    new double[]{48.0, 49.0, 49.0, 48.0, 48.0},
+    new double[]{1.5,  1.5,  3.5,  3.5,  1.5}
+);
+// createIndexableFields returns multiple Field objects (one per triangle)
+for (Field f : LatLonShape.createIndexableFields("shape", polygon)) {
+    doc.add(f);
+}
+
+// Index a line
+Line line = new Line(
+    new double[]{48.5, 48.8, 49.0},
+    new double[]{2.0,  2.3,  2.5}
+);
+for (Field f : LatLonShape.createIndexableFields("shape", line)) {
+    doc.add(f);
+}
+
+// Index a point as a shape
+for (Field f : LatLonShape.createIndexableFields("shape", 48.8566, 2.3522)) {
+    doc.add(f);
+}
+
+writer.addDocument(doc);
+```
+
+### Shape query relations
+
+`LatLonShape` queries use `ShapeField.QueryRelation` to express the spatial relationship between indexed shapes and the query geometry:
+
+<AccordionGroup>
+  <Accordion title="INTERSECTS">
+    Returns documents whose indexed shape shares at least one point with the query geometry. This is the default for `LatLonPoint.newPolygonQuery()`.
+
+    ```java
+    import org.apache.lucene.document.LatLonShape;
+    import org.apache.lucene.document.ShapeField;
+    import org.apache.lucene.geo.Polygon;
+    import org.apache.lucene.search.Query;
+
+    Query q = LatLonShape.newPolygonQuery(
+        "shape",
+        ShapeField.QueryRelation.INTERSECTS,
+        polygon
+    );
+    ```
+  </Accordion>
+  <Accordion title="CONTAINS">
+    Returns documents whose indexed shape completely contains the query geometry.
+
+    ```java
+    Query q = LatLonShape.newPolygonQuery(
+        "shape",
+        ShapeField.QueryRelation.CONTAINS,
+        polygon
+    );
+    ```
+  </Accordion>
+  <Accordion title="WITHIN">
+    Returns documents whose indexed shape lies entirely inside the query geometry.
+
+    ```java
+    Query q = LatLonShape.newPolygonQuery(
+        "shape",
+        ShapeField.QueryRelation.WITHIN,
+        polygon
+    );
+    ```
+  </Accordion>
+  <Accordion title="DISJOINT">
+    Returns documents whose indexed shape has no overlap with the query geometry.
+
+    ```java
+    Query q = LatLonShape.newPolygonQuery(
+        "shape",
+        ShapeField.QueryRelation.DISJOINT,
+        polygon
+    );
+    ```
+  </Accordion>
+</AccordionGroup>
+
+You can also query against a bounding box or a line:
+
+```java
+// All shapes that intersect a bounding box
+Query boxQuery = LatLonShape.newBoxQuery(
+    "shape",
+    ShapeField.QueryRelation.INTERSECTS,
+    48.0, 49.5,   // minLat, maxLat
+    1.5,  3.5     // minLon, maxLon
+);
+
+// All shapes that intersect a line
+Query lineQuery = LatLonShape.newLineQuery(
+    "shape",
+    ShapeField.QueryRelation.INTERSECTS,
+    line
+);
+```
+
+## Distance calculations
+
+Lucene uses the Haversine formula (via `SloppyMath.haversinMeters`) for distance queries. The sloppy implementation trades a small amount of accuracy for significantly faster execution; the error is well under 1 metre at any distance that matters for search.
+
+The value placed into `FieldDoc.fields[0]` by a distance sort is the distance in **metres** as a `Double`.
+
+## XYPoint and XYShape — cartesian coordinates
+
+For flat 2-D spaces where the WGS84 geodetic model is inappropriate, use `XYPointField` and `XYShape`. The API mirrors the LatLon equivalents but takes `float` coordinates instead of `double`.
+
+```java
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.XYPointField;
+import org.apache.lucene.geo.XYPolygon;
+import org.apache.lucene.geo.XYCircle;
+import org.apache.lucene.search.Query;
+
+// Index a 2-D point
+Document doc = new Document();
+doc.add(new XYPointField("pos", 10.5f, 20.3f)); // x, y
+writer.addDocument(doc);
+
+// Bounding box query
+Query boxQuery = XYPointField.newBoxQuery(
+    "pos",
+    /* minX */ 5.0f, /* maxX */ 15.0f,
+    /* minY */ 15.0f, /* maxY */ 25.0f
+);
+
+// Circle query (distance in the same unit as your coordinates)
+Query circleQuery = XYPointField.newDistanceQuery(
+    "pos",
+    /* centerX */ 10.0f,
+    /* centerY */ 20.0f,
+    /* radius */  5.0f
+);
+
+// Polygon query
+XYPolygon poly = new XYPolygon(
+    new float[]{5f, 15f, 15f, 5f, 5f},
+    new float[]{15f, 15f, 25f, 25f, 15f}
+);
+Query polyQuery = XYPointField.newPolygonQuery("pos", poly);
+```
+
+<Note>
+`XYPointField` uses `float` (32-bit) coordinates. This gives roughly 7 significant decimal digits of precision — adequate for most projected coordinate systems (e.g. metres in a local UTM zone).
+</Note>
+
+## Combining geo queries with other filters
+
+Geo queries are standard Lucene `Query` objects and compose freely with `BooleanQuery`:
+
+```java
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.index.Term;
+
+Query geoFilter = LatLonPoint.newDistanceQuery("location", 48.8566, 2.3522, 50_000);
+Query categoryFilter = new TermQuery(new Term("category", "restaurant"));
+
+Query combined = new BooleanQuery.Builder()
+    .add(geoFilter, BooleanClause.Occur.FILTER)
+    .add(categoryFilter, BooleanClause.Occur.FILTER)
+    .build();
+```

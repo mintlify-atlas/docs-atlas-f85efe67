@@ -1,0 +1,115 @@
+---
+title: "Documents and fields"
+description: "How to structure data for indexing in Lucene"
+---
+
+A Lucene index is made up of **documents**. A `Document` is a flat collection of fields — there is no nesting or schema enforcement. Each field has a name, a type, and a value. When you call `IndexWriter.addDocument()`, Lucene stores and indexes those fields according to their type configuration.
+
+```java
+// Documents are the unit of indexing and search.
+// A Document is a set of fields. Each field has a name and a textual value.
+Document doc = new Document();
+```
+
+Fields marked as stored are returned with search hits. Fields that are only indexed contribute to matching and ranking but are not retrievable from the index.
+
+## Field types
+
+Lucene ships several concrete `Field` subclasses. Most applications should use these rather than constructing a raw `Field` with a custom `FieldType`.
+
+| Class | Value type | Analyzed | Indexed | Stored (optional) | Use for |
+|---|---|---|---|---|---|
+| `TextField` | `String` / `Reader` | Yes | Yes (`DOCS_AND_FREQS_AND_POSITIONS`) | Optional | Full-text search on prose content |
+| `StringField` | `String` / `BytesRef` | No | Yes (`DOCS` only) | Optional | Exact-match keywords, IDs, enum values |
+| `IntField` | `int` | No | Yes (points + doc values) | Optional | Numeric range queries and sorting |
+| `LongField` | `long` | No | Yes (points + doc values) | Optional | Timestamps, counts, range queries |
+| `FloatField` | `float` | No | Yes (points + doc values) | Optional | Floating-point range queries |
+| `DoubleField` | `double` | No | Yes (points + doc values) | Optional | High-precision floating-point range |
+| `KeywordField` | `String` / `BytesRef` | No | Yes (sorted doc values + inverted index) | Optional | Exact-match with efficient faceting/sorting |
+| `StoredField` | `String` / `byte[]` / numeric | No | No | Always | Retrieve original values with hits |
+| `KnnFloatVectorField` | `float[]` | No | Yes (HNSW graph) | No | Nearest-neighbor / semantic vector search |
+
+<Note>
+  `TextField` uses `IndexOptions.DOCS_AND_FREQS_AND_POSITIONS` by default. `StringField` uses `IndexOptions.DOCS` and omits norms, because exact-match fields do not need term frequency or positional data.
+</Note>
+
+## IndexOptions
+
+`IndexOptions` controls how much information Lucene stores in the inverted index for a field.
+
+<AccordionGroup>
+  <Accordion title="DOCS">
+    Records only which documents contain a term. Sufficient for boolean queries and exact-match lookups. Used by `StringField`.
+  </Accordion>
+  <Accordion title="DOCS_AND_FREQS">
+    Records documents and term frequency within each document. Enables TF-based relevance scoring but no phrase queries.
+  </Accordion>
+  <Accordion title="DOCS_AND_FREQS_AND_POSITIONS">
+    Records documents, frequencies, and the position of each token. Required for phrase queries (`PhraseQuery`) and proximity queries. Default for `TextField`.
+  </Accordion>
+</AccordionGroup>
+
+Setting `IndexOptions.NONE` on a `FieldType` means the field is not indexed at all — it can still be stored.
+
+## DocValues vs stored fields
+
+Lucene offers two ways to retrieve field values at query time:
+
+<CardGroup cols={2}>
+  <Card title="Stored fields" icon="database">
+    Values are saved in a row-oriented store alongside the document. Retrieved per-document after a hit is found. Good for displaying original content in search results. Use `Field.Store.YES` or `StoredField`.
+  </Card>
+  <Card title="DocValues" icon="table-columns">
+    Values are stored in a column-oriented structure, one column per field across all documents. Efficient for sorting, faceting, and aggregations over large result sets. Use `NumericDocValuesField`, `SortedDocValuesField`, `KeywordField`, or the numeric field classes.
+  </Card>
+</CardGroup>
+
+<Tip>
+  For a numeric field you need to both filter by range and sort on, use `LongField` or `IntField` — they index both a point (for range queries) and a doc value (for sorting) in a single field addition.
+</Tip>
+
+A common pattern is to add the same logical value twice: once as a `TextField` for full-text search, and once as a `StoredField` to retrieve the original text without re-running the analyzer.
+
+## Building a document
+
+The following example is adapted from the Lucene demo (`IndexFiles.java`) and shows how to combine field types in a single document.
+
+```java
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
+import org.apache.lucene.document.KeywordField;
+import org.apache.lucene.document.KnnFloatVectorField;
+import org.apache.lucene.document.LongField;
+import org.apache.lucene.document.StoredField;
+import org.apache.lucene.document.TextField;
+import org.apache.lucene.index.VectorSimilarityFunction;
+
+Document doc = new Document();
+
+// Exact-match string field: indexed verbatim, also stored so it is
+// returned with search hits.
+doc.add(new KeywordField("path", file.toString(), Field.Store.YES));
+
+// Numeric field: indexed with points for range queries and doc values
+// for sorting. Not stored (the value can be recomputed from the path).
+doc.add(new LongField("modified", lastModified, Field.Store.NO));
+
+// Full-text field: tokenized by the configured Analyzer, not stored.
+// Pass a Reader so that large files are streamed rather than loaded
+// into memory.
+doc.add(new TextField("contents",
+    new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))));
+
+// Vector field: dense float[] for nearest-neighbor search.
+doc.add(new KnnFloatVectorField(
+    "contents-vector", embeddingVector, VectorSimilarityFunction.DOT_PRODUCT));
+
+// Store-only field: never searched, only retrieved.
+doc.add(new StoredField("summary", summaryText));
+
+writer.addDocument(doc);
+```
+
+<Note>
+  Fields which are not stored are not available in documents retrieved from the index via `StoredFields.document(int)`. Index at least one stored field per document that uniquely identifies it (for example, a `KeywordField` with `Field.Store.YES`).
+</Note>

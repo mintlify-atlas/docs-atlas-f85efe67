@@ -1,0 +1,201 @@
+---
+title: "Vector search"
+description: "KNN vector search with HNSW for semantic retrieval"
+---
+
+Lucene's core library includes native support for approximate nearest-neighbor (ANN) vector search using the HNSW (Hierarchical Navigable Small World) graph algorithm. This enables semantic and hybrid retrieval without any external plugin.
+
+## What KNN/HNSW vector search is
+
+KNN vector search finds the `k` documents whose stored vectors are most similar to a query vector according to a chosen distance function. Lucene indexes these vectors in an HNSW graph, which provides sub-linear query time at the cost of some recall (approximate, not exact). When a pre-filter is applied, Lucene dynamically switches to exact search when the filtered candidate set is small enough.
+
+No extra module dependency is required — KNN vector support is part of `lucene-core`.
+
+## Vector field types
+
+<CardGroup cols={2}>
+  <Card title="KnnFloatVectorField" icon="calculator">
+    Stores dense `float[]` vectors. Each dimension is a 32-bit float. Supports up to 1024 dimensions per field. Use for embedding models that output `float32` vectors.
+  </Card>
+  <Card title="KnnByteVectorField" icon="microchip">
+    Stores dense `byte[]` vectors. Each dimension is an 8-bit signed integer. More compact than float; suitable for quantized embeddings.
+  </Card>
+</CardGroup>
+
+## VectorSimilarityFunction
+
+The similarity function is set per-field at index time and must match the function used at query time.
+
+| Function | Description |
+|---|---|
+| `EUCLIDEAN` | L2 (Euclidean) distance. Default. Lower distance = more similar. |
+| `DOT_PRODUCT` | Dot product. Vectors must be unit-length; use `VectorUtil.l2normalize()`. |
+| `COSINE` | Cosine similarity. Zero vectors are not permitted. |
+| `MAXIMUM_INNER_PRODUCT` | Maximum inner product. Does not require unit-length vectors. |
+
+## Indexing float vectors
+
+`KnnFloatVectorField` stores a `float[]` vector alongside a similarity function for a named field. Every document can store at most one value per vector field.
+
+```java
+import org.apache.lucene.document.KnnFloatVectorField;
+import org.apache.lucene.index.VectorSimilarityFunction;
+
+float[] embedding = computeEmbedding(text); // your embedding model
+
+// Constructor: (fieldName, vector, similarityFunction)
+document.add(new KnnFloatVectorField("embedding", embedding,
+    VectorSimilarityFunction.DOT_PRODUCT));
+
+// Or use the default EUCLIDEAN similarity:
+document.add(new KnnFloatVectorField("embedding", embedding));
+```
+
+If you plan to reuse the same field type across many documents (e.g., in a loop), create it once with `createFieldType()`:
+
+```java
+FieldType vectorFieldType = KnnFloatVectorField.createFieldType(
+    768, VectorSimilarityFunction.DOT_PRODUCT);
+
+// For each document:
+document.add(new KnnFloatVectorField("embedding", embedding, vectorFieldType));
+```
+
+<Warning>
+Vectors in a single field must all have the same dimension. Attempting to add a vector with a different dimension than what was first indexed will throw an `IllegalArgumentException`.
+</Warning>
+
+## Searching with KnnFloatVectorQuery
+
+`KnnFloatVectorQuery` runs an approximate KNN search over an indexed `KnnFloatVectorField` and returns the `k` nearest documents.
+
+```java
+import org.apache.lucene.search.KnnFloatVectorQuery;
+
+float[] queryVector = computeEmbedding(userQuery);
+
+// KnnFloatVectorQuery(fieldName, queryVector, k)
+Query knnQuery = new KnnFloatVectorQuery("embedding", queryVector, 10);
+
+TopDocs hits = searcher.search(knnQuery, 10);
+```
+
+`KnnFloatVectorField.newVectorQuery()` is a convenience wrapper:
+
+```java
+Query knnQuery = KnnFloatVectorField.newVectorQuery("embedding", queryVector, 10);
+```
+
+## Combining with BooleanQuery for filtered vector search
+
+Pass a filter `Query` to `KnnFloatVectorQuery` to restrict the candidate set before the ANN search. Lucene automatically chooses between approximate and exact KNN based on how selective the filter is.
+
+```java
+import org.apache.lucene.search.KnnFloatVectorQuery;
+import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.index.Term;
+
+Query filter   = new TermQuery(new Term("category", "science"));
+Query knnQuery = new KnnFloatVectorQuery("embedding", queryVector, 10, filter);
+
+TopDocs hits = searcher.search(knnQuery, 10);
+```
+
+You can also combine KNN results with keyword results using `BooleanQuery`:
+
+```java
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.BooleanClause;
+
+Query keywordQuery = new TermQuery(new Term("body", "lucene"));
+Query knnQuery     = new KnnFloatVectorQuery("embedding", queryVector, 10);
+
+Query hybrid = new BooleanQuery.Builder()
+    .add(keywordQuery, BooleanClause.Occur.SHOULD)
+    .add(knnQuery,     BooleanClause.Occur.SHOULD)
+    .build();
+
+TopDocs hits = searcher.search(hybrid, 10);
+```
+
+## SeededKnnVectorQuery
+
+`SeededKnnVectorQuery` provides a seed query that the HNSW implementation may use to initialize its graph traversal, potentially reducing the number of nodes visited. This is the technique described in "Lexically-Accelerated Dense Retrieval" (SIGIR 2023).
+
+<Note>
+`SeededKnnVectorQuery` is `@lucene.experimental`. The underlying codec is free to ignore the seed; behavior may change across releases.
+</Note>
+
+```java
+import org.apache.lucene.search.SeededKnnVectorQuery;
+import org.apache.lucene.search.KnnFloatVectorQuery;
+
+KnnFloatVectorQuery knnQuery = new KnnFloatVectorQuery("embedding", queryVector, 10);
+
+// Provide a BM25 query as the seed to guide graph traversal
+Query textSeed   = new TermQuery(new Term("body", "lucene"));
+Query seededQuery = SeededKnnVectorQuery.fromFloatQuery(knnQuery, textSeed);
+
+TopDocs hits = searcher.search(seededQuery, 10);
+```
+
+## Generating embeddings
+
+Lucene does not include a production embedding model. The demo module ships `DemoEmbeddings`, which tokenizes text, lower-cases it, looks up tokens in a pre-built `KnnVectorDict`, and sums the token vectors into a unit-length result vector.
+
+```java
+import org.apache.lucene.demo.knn.DemoEmbeddings;
+import org.apache.lucene.demo.knn.KnnVectorDict;
+
+KnnVectorDict dict       = new KnnVectorDict(dir, "vectors");
+DemoEmbeddings embedder  = new DemoEmbeddings(dict);
+
+// Returns a unit-length float[] ready for KnnFloatVectorField
+float[] vector = embedder.computeEmbedding("apache lucene search");
+```
+
+In production, replace `DemoEmbeddings` with your preferred embedding model (e.g., a model served via ONNX Runtime, a REST call to an embedding API, or a Java-native library). The interface is simply `float[] computeEmbedding(String input)`.
+
+## Complete indexing and search example
+
+<Steps>
+  <Step title="Index documents with vectors">
+    ```java
+    IndexWriterConfig iwc = new IndexWriterConfig(new StandardAnalyzer());
+    IndexWriter writer = new IndexWriter(FSDirectory.open(Paths.get("/path/to/index")), iwc);
+
+    for (MyDocument myDoc : corpus) {
+        Document doc = new Document();
+        doc.add(new StringField("id", myDoc.id, Field.Store.YES));
+        doc.add(new TextField("body", myDoc.text, Field.Store.YES));
+        float[] vector = embedder.computeEmbedding(myDoc.text);
+        doc.add(new KnnFloatVectorField("embedding", vector,
+            VectorSimilarityFunction.DOT_PRODUCT));
+        writer.addDocument(doc);
+    }
+    writer.commit();
+    writer.close();
+    ```
+  </Step>
+  <Step title="Search with a query vector">
+    ```java
+    DirectoryReader reader  = DirectoryReader.open(FSDirectory.open(Paths.get("/path/to/index")));
+    IndexSearcher searcher  = new IndexSearcher(reader);
+
+    float[] queryVec = embedder.computeEmbedding("semantic search with lucene");
+    Query knnQuery   = new KnnFloatVectorQuery("embedding", queryVec, 10);
+    TopDocs hits     = searcher.search(knnQuery, 10);
+
+    StoredFields storedFields = searcher.storedFields();
+    for (ScoreDoc sd : hits.scoreDocs) {
+        Document doc = storedFields.document(sd.doc);
+        System.out.printf("score=%.4f id=%s%n", sd.score, doc.get("id"));
+    }
+    reader.close();
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+For `DOT_PRODUCT` similarity, vectors must be unit-length. Normalize with `VectorUtil.l2normalize(float[])` before indexing and before querying. Passing un-normalized vectors with `DOT_PRODUCT` produces incorrect rankings without throwing an error.
+</Tip>

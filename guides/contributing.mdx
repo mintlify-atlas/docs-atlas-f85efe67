@@ -1,0 +1,300 @@
+---
+title: Contributing
+description: How to contribute to Apache Lucene — getting the source, building, testing, and submitting a pull request.
+keywords: [contributing, pull request, patch, testing, mailing list, gradle]
+---
+
+Apache Lucene welcomes bug fixes, improvements, and new features. This guide walks through everything you need to go from zero to an open pull request.
+
+## Getting the source code
+
+Clone the repository from GitHub:
+
+<CodeGroup>
+
+```bash Linux / macOS
+git clone https://github.com/apache/lucene
+```
+
+```bash Windows (preserve line endings)
+git clone --config core.autocrlf=false https://github.com/apache/lucene
+```
+
+</CodeGroup>
+
+<Warning>
+On Windows, preserve the original line endings when cloning. Some files have their checksums verified during the build and will fail if line endings are altered.
+</Warning>
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install JDK 25">
+    Lucene 11.0 requires **JDK 25** as the minimum Java version. You can obtain it from any of the following providers:
+
+    - [OpenJDK](https://jdk.java.net/)
+    - [Adoptium Temurin](https://adoptium.net/temurin/releases)
+    - [Azul Zulu](https://www.azul.com/downloads/)
+    - [Oracle JDK](https://www.oracle.com/java/technologies/downloads/)
+
+    Confirm your version before proceeding:
+
+    ```bash
+    java -version
+    ```
+  </Step>
+
+  <Step title="Install Perl and Python 3">
+    Some build tasks — in particular `./gradlew check` — require **Perl** and **Python 3**. Install them using your system's package manager if they are not already present.
+
+    ```bash
+    # Example on Debian/Ubuntu
+    sudo apt install perl python3
+    ```
+  </Step>
+
+  <Step title="Verify the Gradle wrapper">
+    You do **not** need to install Gradle manually. The project ships a Gradle wrapper (`gradlew` / `gradlew.bat`) that downloads the correct version automatically.
+
+    <Warning>
+      Do not use a system-installed `gradle` command. This can result in using a different Gradle version than the project requires, which causes cryptic build errors.
+    </Warning>
+  </Step>
+</Steps>
+
+## Building with Gradle
+
+The Gradle wrapper handles everything needed to build the project from scratch. On first run it creates a `gradle.properties` file with machine-specific settings that can be left as-is in most cases.
+
+To see a summary of typical workflow tasks:
+
+```bash
+./gradlew helpWorkflow
+```
+
+For a full list of help guides covering the build system:
+
+```bash
+./gradlew help
+```
+
+## Code formatting
+
+Lucene enforces [google-java-format](https://github.com/google/google-java-format) conventions for all Java source files. After modifying source files, run:
+
+```bash
+./gradlew tidy
+```
+
+This rewrites your code to comply with the formatting convention automatically.
+
+<Note>
+Wildcard imports are banned but `google-java-format` does not detect or fix them. The pre-commit check (`uvx prek`) will catch them. See [Pre-commit validation](#pre-commit-validation) below.
+</Note>
+
+For more details on formatting rules, run:
+
+```bash
+./gradlew helpFormatting
+```
+
+## Running tests
+
+<AccordionGroup>
+
+  <Accordion title="Run all tests and validations">
+    This is the command to run before submitting a contribution. It assembles Lucene and runs all validation tasks, including tests:
+
+    ```bash
+    ./gradlew check
+    ```
+
+    To run validations but skip tests:
+
+    ```bash
+    ./gradlew check -x test
+    ```
+  </Accordion>
+
+  <Accordion title="Run tests for a specific module">
+    Use the `-p` flag to target a module by its directory path:
+
+    ```bash
+    ./gradlew -p lucene/core test
+    ```
+
+    Or use the full Gradle project path:
+
+    ```bash
+    ./gradlew :lucene:core:test
+    ```
+  </Accordion>
+
+  <Accordion title="Run a single test class or method">
+    ```bash
+    ./gradlew -p lucene/core test --tests TestDemo
+    ./gradlew -p lucene/core test --tests "*testFeatureMissing*"
+    ```
+  </Accordion>
+
+  <Accordion title="Run tests with verbose output">
+    ```bash
+    ./gradlew -p lucene/core test -Ptests.verbose=true --tests TestDemo
+    ```
+  </Accordion>
+
+  <Accordion title="Run tests with a fixed random seed">
+    Lucene tests use randomization. To reproduce a failure, pass the seed reported in the failing test:
+
+    ```bash
+    ./gradlew -p lucene/core test -Ptests.seed=DEADBEEF
+    ```
+  </Accordion>
+
+</AccordionGroup>
+
+For the full list of test options and filtering:
+
+```bash
+./gradlew helpTest
+```
+
+## Pre-commit validation
+
+Lucene uses [prek](https://github.com/j178/prek) for fast pre-commit checks. It lints Markdown files, Python scripts, shell scripts, and more.
+
+**Run checks on staged changes:**
+
+```bash
+uvx prek
+```
+
+**Install as a git pre-commit hook** so checks run automatically before every commit:
+
+```bash
+uv tool install prek
+prek install --allow-missing-config
+```
+
+<Note>
+The `--allow-missing-config` option is required if you also work on older release branches that do not yet support prek.
+</Note>
+
+**Force-check all files** (as CI does):
+
+```bash
+uvx prek --all-files
+```
+
+You need the [uv package manager](https://docs.astral.sh/uv/getting-started/installation/) to run prek.
+
+## Writing tests for bug fixes
+
+<Tip>
+When fixing a bug, write a new test case that **fails before your fix** and passes after. A failing test that demonstrates a bug is a valid contribution on its own.
+</Tip>
+
+Lucene uses the [randomizedtesting](https://github.com/randomizedtesting/randomizedtesting) framework. Place test classes alongside the source they exercise, following the existing naming conventions in the module you are working in.
+
+## Creating a patch or pull request
+
+### Opening a pull request
+
+Open your pull request against the **`main`** branch on [github.com/apache/lucene](https://github.com/apache/lucene). Committers will backport accepted changes to maintenance branches where applicable.
+
+<Steps>
+  <Step title="Fork and branch">
+    Fork the repository on GitHub and create a feature branch from `main`.
+  </Step>
+
+  <Step title="Make your changes">
+    Apply your fix or feature. Run `./gradlew tidy` to format code and `./gradlew check` to verify everything passes.
+  </Step>
+
+  <Step title="Add a CHANGES entry">
+    Add an entry to [`lucene/CHANGES.txt`](https://github.com/apache/lucene/blob/main/lucene/CHANGES.txt). Format it as:
+
+    ```
+    * GITHUB#XXX: Description of the change. (Your Name)
+    ```
+
+    Where `XXX` is the issue or pull request number.
+  </Step>
+
+  <Step title="Open the pull request">
+    Push your branch and open a PR on GitHub. Refer to [GitHub's pull request documentation](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests) if needed.
+  </Step>
+</Steps>
+
+### Creating a patch (alternative)
+
+If you prefer to attach a patch to an issue rather than opening a PR:
+
+1. Keep your `main` branch up to date with upstream: `git pull`.
+2. Generate a patch with `git diff` or `git format-patch`.
+3. Rename the file from `XXX.patch` to `XXX.patch.txt` — GitHub does not accept `.patch` attachments directly.
+4. Attach the file to the relevant GitHub issue.
+
+<Note>
+You do not need to create a patch if you have already opened a pull request.
+</Note>
+
+## IDE support
+
+<AccordionGroup>
+
+  <Accordion title="IntelliJ IDEA">
+    Import the project as a Gradle project — it should work out of the box.
+
+    For faster test execution, configure IntelliJ to use its own built-in test runner: navigate to **File → Settings → Build, Execution, Deployment → Build Tools → Gradle** and set both "Build and run using" and "Run tests using" to **IntelliJ IDEA**.
+
+    Note: some tests are designed to run only via the Gradle wrapper and will not work under the built-in runner.
+  </Accordion>
+
+  <Accordion title="Eclipse">
+    Generate Eclipse project files:
+
+    ```bash
+    ./gradlew eclipse
+    ```
+
+    Then import the project with **File → Import → Existing Project into Workspace**.
+
+    Note: Eclipse does not distinguish between sub-projects and source sets, so all sources and dependencies appear in one combined view.
+  </Accordion>
+
+  <Accordion title="VSCode">
+    Generate the Eclipse-compatible project files (VSCode uses the same setup):
+
+    ```bash
+    ./gradlew eclipse
+    ```
+
+    Then open the Lucene checkout directory in VSCode.
+  </Accordion>
+
+</AccordionGroup>
+
+## Staying involved
+
+Contributors should join the [Lucene mailing lists](https://lucene.apache.org/core/discussion.html):
+
+- **Users list** (`java-user@lucene.apache.org`) — get help and help others.
+- **Developers list** (`dev@lucene.apache.org`) — discuss design and upcoming changes.
+- **Commits list** (`commits@lucene.apache.org`) — see changes as they land.
+
+Keep discussions on the list so everyone benefits. Emailing individual committers about specific issues is discouraged.
+
+<Tip>
+For more contribution guidelines and tips, see the [Lucene Developer Tips wiki](https://cwiki.apache.org/confluence/display/LUCENE/DeveloperTips).
+</Tip>
+
+## Finding a first issue
+
+New contributors looking for a good starting point should look for issues that:
+
+- Have not had any work done yet.
+- Are unlikely to be controversial.
+- Are self-contained with limited scope.
+
+Search the [GitHub issue tracker](https://github.com/apache/lucene/issues) for issues tagged `good first issue` or `help wanted`.

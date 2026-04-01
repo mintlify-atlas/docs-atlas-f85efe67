@@ -1,0 +1,203 @@
+---
+title: "Autocomplete and suggest"
+description: "Build autocomplete and spell-check features with Lucene"
+---
+
+The suggest module provides several implementations for autocomplete (type-ahead completion) and spell checking. All completion implementations extend the `Lookup` abstract class and share a common `build()` / `lookup()` interface.
+
+## Dependency
+
+<CodeGroup>
+
+```xml Maven
+<dependency>
+  <groupId>org.apache.lucene</groupId>
+  <artifactId>lucene-suggest</artifactId>
+  <version>${lucene.version}</version>
+</dependency>
+```
+
+```gradle Gradle
+implementation "org.apache.lucene:lucene-suggest:${luceneVersion}"
+```
+
+</CodeGroup>
+
+## Lookup types
+
+<CardGroup cols={2}>
+  <Card title="AnalyzingInfixSuggester" icon="magnifying-glass">
+    Matches any token within the suggestion, not just the prefix. Backed by a Lucene index; supports NRT updates and context filtering. Best for search-as-you-type over long strings.
+  </Card>
+  <Card title="FuzzySuggester" icon="spell-check">
+    FST-based prefix suggester that tolerates edit-distance errors in the prefix. Loaded entirely into memory. Best for compact dictionaries where typo tolerance is required.
+  </Card>
+  <Card title="WFSTCompletionLookup" icon="bolt">
+    Weighted FST completion. Very memory-efficient. Matches only exact prefixes. Good when memory is tight and typo tolerance is not needed.
+  </Card>
+  <Card title="AnalyzingSuggester" icon="list">
+    FST-based suggester that analyzes the input and indexes tokens. Prefix-only matching, in-memory. Good general-purpose completion for medium-sized dictionaries.
+  </Card>
+</CardGroup>
+
+## The Lookup interface
+
+All suggester implementations share the `Lookup` abstract class:
+
+```java
+// Build from an InputIterator (a stream of (term, weight, payload) triples)
+public abstract void build(InputIterator inputIterator) throws IOException;
+
+// Query for up to num completions for the given key prefix/infix
+public List<LookupResult> lookup(
+    CharSequence key,
+    Set<BytesRef> contexts,
+    boolean onlyMorePopular,
+    int num) throws IOException;
+```
+
+Each `LookupResult` carries:
+- `key` — the completed suggestion text
+- `value` — the weight (higher is more popular)
+- `payload` — optional arbitrary `BytesRef` data
+- `highlightKey` — optionally highlighted version of `key` (set by `AnalyzingInfixSuggester`)
+
+## Building from InputIterator
+
+The simplest way to feed a suggester is via an in-memory `InputIterator`. For production, use `DocumentDictionary` or `FileDictionary` to load from an existing index or file.
+
+```java
+import org.apache.lucene.search.suggest.InputIterator;
+import org.apache.lucene.util.BytesRef;
+
+// Wrap your data as an InputIterator
+InputIterator iterator = new InputIterator() {
+    private final String[] terms   = {"apache lucene", "apache solr", "apache kafka"};
+    private final long[]   weights = {100L, 80L, 90L};
+    private int i = 0;
+
+    @Override public BytesRef next() {
+        return i < terms.length ? new BytesRef(terms[i]) : null;
+    }
+    @Override public long weight()              { return weights[i++]; }
+    @Override public BytesRef payload()         { return null; }
+    @Override public boolean hasPayloads()      { return false; }
+    @Override public Set<BytesRef> contexts()   { return null; }
+    @Override public boolean hasContexts()      { return false; }
+};
+```
+
+## AnalyzingInfixSuggester
+
+`AnalyzingInfixSuggester` analyzes the input and indexes every token, allowing a query prefix to match anywhere within a suggestion (not just at the start). It uses an internal Lucene index stored in a `Directory`.
+
+### Construction
+
+```java
+import org.apache.lucene.search.suggest.analyzing.AnalyzingInfixSuggester;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.store.FSDirectory;
+
+Directory dir = FSDirectory.open(Paths.get("/path/to/suggester-index"));
+Analyzer analyzer = new StandardAnalyzer();
+
+// Simple constructor: uses the same analyzer for indexing and querying.
+// minPrefixChars defaults to 4; shorter prefixes use edge-ngrams.
+AnalyzingInfixSuggester suggester = new AnalyzingInfixSuggester(dir, analyzer);
+```
+
+For finer control, use the full constructor:
+
+```java
+AnalyzingInfixSuggester suggester = new AnalyzingInfixSuggester(
+    dir,
+    indexAnalyzer,
+    queryAnalyzer,
+    AnalyzingInfixSuggester.DEFAULT_MIN_PREFIX_CHARS, // 4
+    /* commitOnBuild */ true,
+    /* allTermsRequired */ true,
+    /* highlight */ true);
+```
+
+### Building and querying
+
+<Steps>
+  <Step title="Build the index">
+    ```java
+    suggester.build(iterator);
+    ```
+  </Step>
+  <Step title="Query for completions">
+    ```java
+    // Look up top 5 suggestions for the prefix "luce"
+    List<Lookup.LookupResult> results = suggester.lookup("luce", false, 5);
+    for (Lookup.LookupResult r : results) {
+        // r.highlightKey contains HTML-highlighted version of r.key
+        System.out.println(r.key + " (weight=" + r.value + ")");
+    }
+    ```
+  </Step>
+  <Step title="Add or update entries (NRT)">
+    ```java
+    // Add a new suggestion without rebuilding the entire index
+    suggester.add(new BytesRef("apache flink"), null, 75L, null);
+    suggester.refresh();
+    ```
+  </Step>
+  <Step title="Close when done">
+    ```java
+    suggester.close();
+    ```
+  </Step>
+</Steps>
+
+## FuzzySuggester
+
+`FuzzySuggester` extends `AnalyzingSuggester` with edit-distance tolerance so that typos in the prefix still return results. It is built entirely in memory from an FST.
+
+```java
+import org.apache.lucene.search.suggest.analyzing.FuzzySuggester;
+
+Analyzer analyzer = new StandardAnalyzer();
+FuzzySuggester suggester = new FuzzySuggester(
+    FSDirectory.open(Paths.get("/tmp/fst")), "suggest", analyzer);
+
+suggester.build(iterator);
+
+List<Lookup.LookupResult> results = suggester.lookup("apche", false, 5);
+// "apache lucene", "apache solr", etc. are still returned despite the typo
+```
+
+## WFSTCompletionLookup
+
+`WFSTCompletionLookup` is a compact, in-memory weighted FST that supports exact-prefix matching only. It is the most memory-efficient option.
+
+```java
+import org.apache.lucene.search.suggest.fst.WFSTCompletionLookup;
+
+WFSTCompletionLookup suggester = new WFSTCompletionLookup(
+    FSDirectory.open(Paths.get("/tmp/wfst")), "suggest");
+suggester.build(sortedIterator); // must be sorted by key
+List<Lookup.LookupResult> results = suggester.lookup("apa", false, 5);
+```
+
+<Note>
+`WFSTCompletionLookup` requires the `InputIterator` to produce entries in sorted order. Wrap an unsorted iterator with `SortedInputIterator`.
+</Note>
+
+## Spell checking
+
+For spell checking (correcting misspelled whole words rather than completing prefixes), use `DirectSpellChecker`. It operates directly over the index terms without building a separate data structure.
+
+```java
+import org.apache.lucene.search.spell.DirectSpellChecker;
+import org.apache.lucene.search.spell.SuggestWord;
+
+DirectSpellChecker checker = new DirectSpellChecker();
+SuggestWord[] suggestions = checker.suggestSimilar(
+    new Term("body", "apche"), 5, indexReader);
+
+for (SuggestWord w : suggestions) {
+    System.out.println(w.string + " (freq=" + w.freq + ")");
+}
+```
